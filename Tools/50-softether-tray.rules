@@ -1,0 +1,32 @@
+/* softether-tray 免密规则。
+ *
+ * 只对 cn.softether.tray.net 这一个 action 免密，而该 action 在
+ * /usr/share/polkit-1/actions/cn.softether.tray.net.policy 里通过
+ * org.freedesktop.policykit.exec.path 绑死到
+ * /usr/libexec/softether-tray/softether-tray-net。
+ *
+ * 也就是说：只有那个参数受限的脚本能免密以 root 运行，`pkexec bash`、
+ * `pkexec ip ...` 这类照样要密码。脚本自己还校验网卡必须 vpn* 前缀、
+ * 网段不能是 0.0.0.0/0，越权范围被压到最小。
+ */
+
+polkit.addRule(function (action, subject) {
+    if (action.id !== "cn.softether.tray.net") {
+        return null;
+    }
+
+    // 只对**本地活动会话**里的用户放行。
+    // 远程 SSH 会话（inactive/remote）和其他人登录的会话仍然要密码 ——
+    // 否则任何能登上这台机器的人都能改网络配置。
+    if (subject.local !== true || subject.active !== true) {
+        return null;
+    }
+
+    // 限定必须是 wheel/sudo 组里的人（Deepin/Debian 上通常是 sudo 组）。
+    // 想对所有用户放开，把这个 return 删掉即可，但那是明确的安全性下降。
+    if (subject.isInGroup("sudo") || subject.isInGroup("wheel") || subject.isInGroup("root")) {
+        return polkit.Result.YES;
+    }
+
+    return null;
+});

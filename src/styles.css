@@ -1,0 +1,454 @@
+/*
+ * 界面风格由 <html data-style="win11|deepin"> 切换（见 lib/api.ts 的 applyUiStyle）。
+ * :root 即 Win11 风格：JS 还没跑起来时也不会裸奔；deepin 只覆盖取值，
+ * 组件样式全部吃变量，结构差异（导航指示条/标签形状）也由变量控制。
+ */
+:root {
+  /* Win11：Segoe 优先，Linux 上回退到系统 CJK 字体 */
+  --font: "Segoe UI Variable Text", "Segoe UI", "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+
+  /* Mica 浅灰画布 + 白色内容面 */
+  --bg: #f3f3f3;
+  --panel: #ffffff;
+  --panel-muted: #fafafa;
+  --line: #e5e5e5;
+  --line-strong: #d0d0d0;
+  --text: #1f1f1f;
+  --text-soft: #5c5c5c;
+  --text-hint: #8a8a8a;
+
+  /* Windows 11 浅色主题默认强调蓝 */
+  --accent: #0067c0;
+  --accent-hover: #005a9e;
+  --accent-soft: #e8f1fb;
+  --accent-line: #b6d3ee;
+  --accent-ink: #0c447c;
+
+  --ok: #0f6e56;
+  --ok-soft: #e1f5ee;
+  --ok-line: #9fe1cb;
+  --warn: #854f0b;
+  --warn-soft: #faeeda;
+  --warn-line: #fac775;
+  --danger: #a32d2d;
+  --danger-soft: #fcebeb;
+  --danger-line: #f7c1c1;
+  --off-bg: #f0f0f0;
+  --off-line: #d0d0d0;
+
+  /* Fluent：控件方角（4px）、卡片 8px */
+  --radius: 8px;
+  --radius-ctl: 4px;
+
+  /* 靠描边分层，卡片不投影，只有弹窗压一层深影 */
+  --shadow-card: none;
+  --shadow-dialog: 0 16px 40px rgba(0, 0, 0, 0.24);
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.16);
+  --shadow-btn: none;
+
+  /* 侧栏选中：浅色底 + 左侧强调色指示条（Win11 设置应用） */
+  --nav-active-bg: var(--accent-soft);
+  --nav-active-fg: var(--accent-ink);
+  --nav-indicator: var(--accent);
+  --nav-indicator-w: 3px;
+
+  /* 标签页：下划线指示 */
+  --tab-active-bg: transparent;
+  --tab-active-fg: var(--accent);
+  --tab-indicator: 2px solid var(--accent);
+  --tab-radius: 4px;
+
+  --ghost-hover-bg: #f5f5f5;
+  --ghost-hover-border: var(--line-strong);
+  --ghost-hover-fg: var(--text);
+
+  --overlay-bg: rgba(31, 31, 31, 0.32);
+  --overlay-blur: none;
+  --toast-radius: 8px;
+  --focus-ring: var(--accent-soft);
+
+  /* 左上角标识块：深灰磁贴 */
+  --mark-bg: #2b2b2b;
+  --mark-radius: 8px;
+
+  /* 自定义顶栏：Win11 标题栏按钮是通栏全高的方角块 */
+  --titlebar-bg: var(--bg);
+  --titlebar-fg: var(--text);
+  --titlebar-border: var(--line);
+  --caption-fg: var(--text);
+  --caption-w: 46px;
+  --caption-h: 100%;
+  --caption-gap: 0px;
+  --caption-radius: 0px;
+  --caption-hover-bg: #dedede;
+  --caption-hover-fg: var(--text);
+  --caption-close-bg: #c42b1c;
+  --caption-close-fg: #ffffff;
+}
+
+:root[data-style="deepin"] {
+  /* Deepin 25：Noto Sans CJK 优先 */
+  --font: "Noto Sans CJK SC", "Source Han Sans SC", "WenQuanYi Micro Hei", "PingFang SC", "Microsoft YaHei", sans-serif;
+
+  /* 冷灰画布，卡片靠大圆角 + 柔和投影浮起来（DDE） */
+  --bg: #eef1f6;
+  --panel: #ffffff;
+  --panel-muted: #f7f8fa;
+  --line: #e4e8ee;
+  --line-strong: #ccd4de;
+  --text: #2b2f36;
+  --text-soft: #5c6470;
+  --text-hint: #8b93a1;
+
+  /* Deepin 蓝 */
+  --accent: #2b79ff;
+  --accent-hover: #2069ea;
+  --accent-soft: #e9f1ff;
+  --accent-line: #b7d2ff;
+  --accent-ink: #1a4db3;
+
+  --ok: #0f7a55;
+  --ok-soft: #e2f5ec;
+  --ok-line: #95ddc0;
+  --warn: #8a5309;
+  --warn-soft: #fdf0da;
+  --warn-line: #fbc877;
+  --danger: #b23329;
+  --danger-soft: #fdecea;
+  --danger-line: #f4b8b3;
+  --off-bg: #eef0f3;
+  --off-line: #ccd4de;
+
+  --radius: 12px;
+  --radius-ctl: 8px;
+
+  --shadow-card: 0 4px 14px rgba(35, 55, 95, 0.08);
+  --shadow-dialog: 0 12px 36px rgba(20, 35, 70, 0.28);
+  --shadow-pop: 0 10px 28px rgba(20, 35, 70, 0.18);
+  --shadow-btn: 0 2px 8px rgba(43, 121, 255, 0.3);
+
+  /* 侧栏选中：深蓝实心胶囊（DDE 控制中心） */
+  --nav-active-bg: var(--accent);
+  --nav-active-fg: #ffffff;
+  --nav-indicator: transparent;
+  --nav-indicator-w: 0px;
+
+  /* 标签页：实心圆角胶囊 */
+  --tab-active-bg: var(--accent);
+  --tab-active-fg: #ffffff;
+  --tab-indicator: 2px solid transparent;
+  --tab-radius: 999px;
+
+  --ghost-hover-bg: var(--accent-soft);
+  --ghost-hover-border: var(--accent);
+  --ghost-hover-fg: var(--accent);
+
+  --overlay-bg: rgba(28, 40, 62, 0.42);
+  --overlay-blur: blur(3px);
+  --toast-radius: 10px;
+  --focus-ring: var(--accent-soft);
+
+  --mark-bg: var(--accent);
+  --mark-radius: 10px;
+
+  /* Deepin 标题栏按钮是留白的圆角块 */
+  --titlebar-bg: var(--bg);
+  --titlebar-fg: var(--text);
+  --titlebar-border: var(--line);
+  --caption-fg: var(--text-soft);
+  --caption-w: 38px;
+  --caption-h: 28px;
+  --caption-gap: 5px;
+  --caption-radius: 8px;
+  --caption-hover-bg: #dfe4ec;
+  --caption-hover-fg: var(--text);
+  --caption-close-bg: #e05a4d;
+  --caption-close-fg: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+button {
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  /* 按钮永不换行、不被 flex 收缩：中文按钮一旦被压窄会逐字竖排 */
+  white-space: nowrap;
+  flex: none;
+}
+
+input {
+  font-family: inherit;
+  font-size: 13px;
+  user-select: text;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
+}
+
+h1,
+h2,
+h3 {
+  font-weight: 500;
+  margin: 0;
+}
+
+h1 {
+  font-size: 15px;
+}
+
+h2 {
+  font-size: 14px;
+}
+
+h3 {
+  font-size: 13px;
+}
+
+.mono {
+  font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+  font-size: 12px;
+}
+
+.muted {
+  color: var(--text-soft);
+}
+
+.hint {
+  color: var(--text-hint);
+  font-size: 12px;
+}
+
+.card {
+  background: var(--panel);
+  border: 0.5px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  /* 卡片作为纵向 flex 项时不参与收缩：否则内容超高会被压扁，而不是让容器滚动 */
+  flex: none;
+}
+
+button.primary {
+  background: var(--accent);
+  color: #fff;
+  border: 0.5px solid var(--accent);
+  border-radius: var(--radius-ctl);
+  padding: 7px 16px;
+  min-height: 34px;
+  box-shadow: var(--shadow-btn);
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+button.primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button.ghost {
+  background: transparent;
+  color: var(--text);
+  border: 0.5px solid var(--line-strong);
+  border-radius: var(--radius-ctl);
+  padding: 7px 14px;
+  min-height: 34px;
+}
+
+button.ghost:hover:not(:disabled) {
+  background: var(--ghost-hover-bg);
+  border-color: var(--ghost-hover-border);
+  color: var(--ghost-hover-fg);
+}
+
+button.danger {
+  background: transparent;
+  color: var(--danger);
+  border: 0.5px solid var(--danger-line);
+  border-radius: var(--radius-ctl);
+  padding: 7px 14px;
+  min-height: 34px;
+}
+
+button.danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+
+button.ghost:disabled,
+button.danger:disabled,
+button.primary:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+input[type="text"],
+input[type="password"],
+input[type="number"] {
+  width: 100%;
+  background: var(--panel);
+  border: 0.5px solid var(--line-strong);
+  border-radius: var(--radius-ctl);
+  padding: 6px 10px;
+  min-height: 32px;
+  color: var(--text);
+}
+
+input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field label {
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  border: 0.5px solid transparent;
+}
+
+.badge.ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+  border-color: var(--ok-line);
+}
+
+.badge.off {
+  background: var(--off-bg);
+  color: var(--text-soft);
+  border-color: var(--off-line);
+}
+
+.badge.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+  border-color: var(--warn-line);
+}
+
+.badge.bad {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-color: var(--danger-line);
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 0.5px solid var(--line);
+  padding: 0 20px;
+  background: var(--panel);
+}
+
+.tabs button {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: var(--tab-radius);
+  color: var(--text-soft);
+  padding: 10px 12px 8px;
+}
+
+.tabs button.active {
+  background: var(--tab-active-bg);
+  color: var(--tab-active-fg);
+  border-bottom: var(--tab-indicator);
+}
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  background: var(--overlay-bg);
+  backdrop-filter: var(--overlay-blur);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 20;
+}
+
+.dialog {
+  background: var(--panel);
+  border-radius: var(--radius);
+  border: 0.5px solid var(--line);
+  box-shadow: var(--shadow-dialog);
+  width: 100%;
+  max-width: 520px;
+  max-height: 100%;
+  overflow: auto;
+  padding: 20px;
+}
+
+.dialog header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.toast {
+  position: absolute;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--text);
+  color: #fff;
+  border-radius: var(--toast-radius);
+  padding: 8px 14px;
+  font-size: 12px;
+  max-width: 80%;
+  z-index: 30;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.18);
+}
+
+.toast.error {
+  background: var(--danger);
+}

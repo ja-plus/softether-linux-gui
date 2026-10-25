@@ -1,0 +1,313 @@
+#!/bin/sh
+# softether-tray 的特权网络代理脚本 —— 唯一被 polkit 免密放行的程序。
+#
+# 为什么要有这个脚本：Linux 版的 SoftEther 客户端只管建隧道，不给虚拟网卡配
+# IP、不写路由。这两件事都必须 root。如果直接放行 `ip route`、`dhclient`，
+# 任何本地进程都能拿下 root；所以这里把所有网卡操作收窄成一个**参数受限**的
+# 固定程序，polkit 只允许无人值守运行这一个路径。
+#
+# 安全边界（改这个文件前先读完）：
+#   1. 网卡名必须以 vpn 开头，且必须已存在于 /sys/class/net。绝不能放宽 ——
+#      否则可以拿它改 eth0 的地址。
+#   2. 网段必须点分 IPv4 + /0..32，且拒绝 0.0.0.0/0 与 0.0.0.0/x，避免被当成
+#      "全流量劫持"工具。
+#   3. MTU 限定 576..1500。
+#   4. 不接受任意命令、shell 片段或用户文件，只接受枚举的动作名。
+#
+# 用法：
+#   softether-tray-net connect  <iface> <mtu> <网段,网段,...> [--lease] [--check]
+#   softether-tray-net cleanup  <iface> <网段,网段,...> [--flush]     [--check]
+#   softether-tray-net probe    <iface> <候选网段,网段,...>
+#   softether-tray-net vpnclient start|stop <vpnclient 绝对路径>
+#
+# 退出码：0 成功；2 参数非法；3 拿不到网关；4 没有 DHCP 客户端；5 身份不对。
+
+set -eu
+
+# GUI 会话的 PATH 通常不含 /sbin，必须自己补全
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+note() { printf '%s\n' "$*"; }
+die() { printf '%s\n' "$1" >&2; exit "${2:-1}"; }
+
+# 网卡名：vpn 前缀 + 保守字符集 + 必须真实存在
+check_iface() {
+    iface=$1
+    [ -n "$iface" ] || die "缺少网卡名" 2
+    case "$iface" in
+        vpn*) ;;
+        *) die "拒绝操作非 VPN 网卡: $iface" 2 ;;
+    esac
+    if printf '%s' "$iface" | grep -q '[^A-Za-z0-9_.:-]'; then
+        die "网卡名含非法字符: $iface" 2
+    fi
+    [ -d "/sys/class/net/$iface" ] || die "网卡不存在: $iface" 2
+}
+
+# 网段：点分 IPv4 + 前缀 0..32；拒绝默认路由与 0.0.0.0/x
+check_subnet() {
+    net=$1
+    [ -n "$net" ] || die "空网段" 2
+    octet='([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])'
+    prefix='([0-9]|[12][0-9]|3[0-2])'
+    if ! printf '%s' "$net" | grep -Eq "^$octet\\.$octet\\.$octet\\.$octet/$prefix$"; then
+        die "网段格式非法: $net" 2
+    fi
+    case "$net" in
+        0.0.0.0) die "网段网络地址非法: $net" 2 ;;
+    esac
+    case "$net" in
+        0.0.0.0/*) die "拒绝下发默认路由（会劫持全部流量）: $net" 2 ;;
+    esac
+}
+
+check_mtu() {
+    mtu=$1
+    case "$mtu" in
+        ''|*[!0-9]*) die "MTU 必须是整数: $mtu" 2 ;;
+    esac
+    if [ "$mtu" -lt 576 ] || [ "$mtu" -gt 1500 ]; then
+        die "MTU 超出 576..1500: $mtu" 2
+    fi
+}
+
+# 把逗号分隔的网段展开成位置参数，逐个校验。
+#
+# 关键：**不能用 `printf | while` 迭代**。管道右侧在子 shell 里，里面 `die` 的
+# `exit` 只退出子 shell，外层照样往下跑 —— 表现是非法网段被放行、ip route 直接
+# 吃到脏参数。这里用 `set --` 展开，全部在原 shell 内，dying 才能真的终止。
+check_nets() {
+    nets=$1
+    [ -n "$nets" ] || die "缺少网段列表" 2
+    old_ifs=$IFS
+    IFS=,
+    # shellcheck disable=SC2086  # 就是要按逗号拆词
+    set -- $nets
+    IFS=$old_ifs
+    [ $# -gt 0 ] || die "网段列表为空" 2
+    for net in "$@"; do
+        check_subnet "$net"
+    done
+}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# 申请一次租约就退出：不在这留常驻守护进程
+lease_address() {
+    iface=$1
+    ip -4 addr flush dev "$iface" 2>/dev/null || true
+    if have dhclient; then
+        dhclient -1 -4 "$iface" 2>/dev/null || true
+    elif have dhcpcd; then
+        dhcpcd -1 -4 -t 15 "$iface" 2>/dev/null || true
+    else
+        return 1
+    fi
+    ip link set dev "$iface" up
+    return 0
+}
+
+# 网关 = 网卡上 proto kernel 那条网段路由的第一跳（192.168.50.19/24 → 192.168.50.1）。
+# OFS 必须在 BEGIN 里设：写在动作里时字段已按 -F. 拆完，会输出 "192 168 50 1"。
+derive_gateway() {
+    iface=$1
+    ip -4 route show dev "$iface" \
+        | awk '/proto kernel/ && / src / {print $1; exit}' \
+        | cut -d/ -f1 \
+        | awk -F. 'BEGIN{OFS="."} NF==4{$4=1; print}'
+}
+
+cmd_connect() {
+    check_mode=0
+    [ "${1:-}" = "--check" ] && { check_mode=1; shift; }
+    iface=${1:?} mtu=${2:?} nets=${3:?} extra=${4:-}
+    check_iface "$iface"
+    check_mtu "$mtu"
+    check_nets "$nets"
+
+    need_lease=0
+    [ "$extra" = "--lease" ] && need_lease=1
+
+    if [ "$check_mode" -eq 1 ]; then
+        note "CHECK_OK iface=$iface mtu=$mtu lease=$need_lease nets=$nets"
+        return 0
+    fi
+
+    if [ "$need_lease" -eq 1 ]; then
+        lease_address "$iface" \
+            || die "系统没有 dhclient/dhcpcd，无法为 $iface 申请地址" 4
+    fi
+
+    gw=$(derive_gateway "$iface")
+    [ -n "$gw" ] || { printf 'NO_GATEWAY\n' >&2; exit 3; }
+
+    ip link set dev "$iface" mtu "$mtu"
+    ip -4 route del default dev "$iface" 2>/dev/null || true
+
+    old_ifs=$IFS; IFS=,
+    # shellcheck disable=SC2086
+    set -- $nets
+    IFS=$old_ifs
+    for net in "$@"; do
+        ip -4 route replace "$net" via "$gw" dev "$iface"
+    done
+
+    note "GATEWAY=$gw"
+}
+
+cmd_cleanup() {
+    check_mode=0
+    [ "${1:-}" = "--check" ] && { check_mode=1; shift; }
+    iface=${1:?} nets=${2:?} extra=${3:-}
+    check_iface "$iface"
+    check_nets "$nets"
+    flush=0
+    [ "$extra" = "--flush" ] && flush=1
+
+    if [ "$check_mode" -eq 1 ]; then
+        note "CHECK_OK iface=$iface flush=$flush nets=$nets"
+        return 0
+    fi
+
+    old_ifs=$IFS; IFS=,
+    # shellcheck disable=SC2086
+    set -- $nets
+    IFS=$old_ifs
+    for net in "$@"; do
+        ip -4 route del "$net" dev "$iface" 2>/dev/null || true
+    done
+    if [ "$flush" -eq 1 ]; then
+        ip -4 addr flush dev "$iface" 2>/dev/null || true
+    fi
+    note "CLEANED"
+}
+
+# 验证"已配置的网段"是否真能经隧道到达。
+#
+# **这不是自动发现**，故意的。Linux 版客户端不做路由推送（服务端 DHCP 的
+# PUSHROUTE 只存在于 Windows 版实现里），所以"内网有哪些网段"本地问不出来。
+# 试过两种猜法，都不可靠：
+#   - 猜网段的 .1/.254 是网关 → 实测 10.0.0.1 根本不存在，但 10.10.4.160 通，
+#     说明内网网关既不在 .1 也不在 .254，猜法直接失效；
+#   - 读 ARP 表 → 只能看到同一广播域（192.168.50.0/24）里的邻居，
+#     跨网段目标（10.10.4.160）永远不会出现在里面。
+# 与其做一个"看起来自动、实际漏网段"的假功能，不如只回答能可靠回答的问题：
+# **你填的这些网段，走隧道到底通不通。**
+#
+# 判据：每个网段用它的网络地址 + 一个探测点做两件事
+#   1. `ip route get` 确认流量确实被这条网段路由导向本网卡（配置生效）
+#   2. 向网关 ping 一次，确认隧道那侧有响应（链路可用）
+# 输出每行 `OK <网段>` / `NOROUTE <网段>` / `DEAD <网段>`。
+cmd_probe() {
+    check_mode=0
+    [ "${1:-}" = "--check" ] && { check_mode=1; shift; }
+    iface=${1:?} nets=${2:?}
+    check_iface "$iface"
+    check_nets "$nets"
+
+    if [ "$check_mode" -eq 1 ]; then
+        note "CHECK_OK iface=$iface verify nets=$nets"
+        return 0
+    fi
+
+    gw=$(derive_gateway "$iface")
+    [ -n "$gw" ] || { printf 'NO_GATEWAY\n' >&2; exit 3; }
+
+    old_ifs=$IFS; IFS=,
+    # shellcheck disable=SC2086
+    set -- $nets
+    IFS=$old_ifs
+
+    # 先单独判定隧道本身是否活着。
+    #
+    # 这一步和"某个网段通不通"必须分开：网关就在本网卡的路由里，ping 它只能证明
+    # "隧道那侧至少有一个活物"，证明不了"10.0.0.0/8 后面有东西"。
+    tunnel=0
+    if ping -c 1 -W 2 -I "$iface" "$gw" >/dev/null 2>&1; then
+        tunnel=1
+    fi
+    note "TUNNEL $([ "$tunnel" -eq 1 ] && echo up || echo down)"
+
+    ok=0 noroute=0 dead=0
+    for net in "$@"; do
+        # 用网段的网络地址去问"这个包会从哪出去"。
+        # 命中本网卡 = 路由已生效；命中物理网卡 = 这条配置形同虚设。
+        #
+        # 这里刻意**不再对网段内某个 IP 下"通/不通"的结论**。实测 10.0.0.1 不存在
+        # 而 10.10.4.160 通 —— 同一个网段里有没有活物，取决于对方开没开 ICMP，
+        # 拿单个地址代表整个网段必然误报。能可靠说的只有两件事：
+        #   路由生效了没有（NOROUTE 是硬事实）
+        #   隧道整体活着没有（TUNNEL down）
+        # 其余一律按"路由已就绪"报告，不编造可达性。
+        if ip -4 route get "${net%%/*}" 2>/dev/null | grep -q "dev $iface"; then
+            if [ "$tunnel" -eq 1 ]; then
+                note "OK $net"
+                ok=$((ok + 1))
+            else
+                note "DEAD $net"
+                dead=$((dead + 1))
+            fi
+        else
+            note "NOROUTE $net"
+            noroute=$((noroute + 1))
+        fi
+    done
+
+    note "SUMMARY ok=$ok noroute=$noroute dead=$dead"
+}
+
+cmd_vpnclient() {
+    action=${1:?} binary=${2:?}
+    case "$action" in
+        start|stop) ;;
+        *) die "只允许 start / stop，收到: $action" 2 ;;
+    esac
+    # 必须绝对路径、可执行，且文件名只能是 SoftEther 自己的客户端
+    case "$binary" in
+        /*) ;;
+        *) die "vpnclient 必须是绝对路径: $binary" 2 ;;
+    esac
+    [ -x "$binary" ] || die "vpnclient 不可执行: $binary" 2
+    case "$(basename "$binary")" in
+        vpnclient|vpnclient_x64) ;;
+        *) die "拒绝执行非 vpnclient 程序: $binary" 2 ;;
+    esac
+    exec "$binary" "$action"
+}
+
+main() {
+    action=${1:-}
+    [ $# -gt 0 ] && shift
+
+    case "$action" in
+        connect)
+            # --check 只做校验、不碰系统，供安装自检与测试用
+            if [ "${1:-}" = "--check" ]; then
+                cmd_connect "--check" "${2:?}" "${3:?}" "${4:?}" "${5:-}"
+                return $?
+            fi
+            [ "$(id -u)" -eq 0 ] || die "must run as root" 5
+            cmd_connect "$@" ;;
+        cleanup)
+            if [ "${1:-}" = "--check" ]; then
+                cmd_cleanup "--check" "${2:?}" "${3:?}" "${4:-}"
+                return $?
+            fi
+            [ "$(id -u)" -eq 0 ] || die "must run as root" 5
+            cmd_cleanup "$@" ;;
+        probe)
+            if [ "${1:-}" = "--check" ]; then
+                cmd_probe "--check" "${2:?}" "${3:?}"
+                return $?
+            fi
+            [ "$(id -u)" -eq 0 ] || die "must run as root" 5
+            cmd_probe "$@" ;;
+        vpnclient)
+            [ "$(id -u)" -eq 0 ] || die "must run as root" 5
+            cmd_vpnclient "$@" ;;
+        *) die "未知动作: ${action:-<空>}" 2 ;;
+    esac
+}
+
+main "$@"

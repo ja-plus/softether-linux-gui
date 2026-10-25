@@ -1,0 +1,57 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SoftEther Tray",
+  "version": "0.1.0",
+  "identifier": "cn.softether.tray",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "SoftEther Tray",
+        "width": 1120,
+        "height": 880,
+        "minWidth": 900,
+        "minHeight": 640,
+        "center": true,
+        "resizable": true,
+        "decorations": false,
+        "visible": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png"
+    ],
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0", "libayatana-appindicator3-1", "policykit-1 | pkexec"],
+        "files": {
+          "../vendor/softether-client/vpnclient": "/usr/lib/softether-tray/client/vpnclient",
+          "../vendor/softether-client/vpncmd": "/usr/lib/softether-tray/client/vpncmd",
+          "../vendor/softether-client/hamcore.se2": "/usr/lib/softether-tray/client/hamcore.se2",
+          "../vendor/softether-client/lang.config": "/usr/lib/softether-tray/client/lang.config",
+          "../vendor/softether-client/ReadMeFirst_License.txt": "/usr/share/doc/soft-ether-tray/SoftEther-LICENSE.txt",
+          "../Tools/softether-tray-net": "/usr/libexec/softether-tray/softether-tray-net",
+          "../Tools/cn.softether.tray.net.policy": "/usr/share/polkit-1/actions/cn.softether.tray.net.policy",
+          "../Tools/50-softether-tray.rules": "/etc/polkit-1/rules.d/50-softether-tray.rules"
+        },
+        "postInstallScript": "../Tools/deb-postinst.sh"
+      }
+    }
+  }
+}

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  softether-tray 的 polkit 授权声明。
+
+  `org.freedesktop.policykit.exec.path` 把这条 action 绑定到**唯一一个**二进制路径。
+  有了这条 annotate，pkexec 拉起该路径时会用这里的 action id（而不是默认的
+  org.freedesktop.policykit.exec）来查权限，于是 50-softether-tray.rules 里的
+  "允许免密" 只对这一个程序生效，别的程序一概不受影响。
+
+  默认值仍是 auth_admin：**不装 rules.d 规则时，行为与手工 pkexec 完全一致**
+  （每次弹密码框）。免密是显式选择，不是默认。
+-->
+<policyconfig>
+  <vendor>softether-tray</vendor>
+  <vendor_url>https://github.com/softether/softether-tray</vendor_url>
+
+  <action id="cn.softether.tray.net">
+    <description>SoftEther VPN 虚拟网卡配置</description>
+    <description xml:lang="en">Configure SoftEther VPN virtual adapter</description>
+    <message>需要管理员权限来为虚拟网卡申请地址、设置 MTU 和下发网段路由</message>
+    <message xml:lang="en">Authentication is required to lease an address, set MTU and install routes on the SoftEther virtual adapter</message>
+    <icon_name>network-vpn</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/softether-tray/softether-tray-net</annotate>
+  </action>
+</policyconfig>
