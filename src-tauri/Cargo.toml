@@ -1,6 +1,6 @@
 [package]
 name = "softether-tray"
-version = "0.1.0"
+version = "0.2.0"
 description = "A Linux tray client for SoftEther VPN"
 edition = "2021"
 rust-version = "1.77.2"
