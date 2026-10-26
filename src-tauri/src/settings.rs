@@ -84,8 +84,42 @@ fn default_true() -> bool {
     true
 }
 
+/// 老配置里没有 `uiStyle` 字段时的兜底，也用于归一化手改坏的取值。
+///
+/// 默认值固定为 win11：老用户升级前没得选，不能因为换了发行版就把皮肤改掉；
+/// 只有真正首次安装（配置文件不存在）才走 `detect_system_ui_style()`。
 fn default_ui_style() -> String {
     "win11".into()
+}
+
+/// 首次安装时按发行版选皮肤：deepin 用自家皮肤，其余系统用 win11。
+///
+/// 只认 `/etc/os-release` 的 `ID` / `ID_LIKE`：deepin 的发行版标识是
+/// `ID=deepin`，基于 deepin 的衍生版会在 `ID_LIKE` 里带 `deepin`。
+/// 文件读不到或解析不出时按 win11 处理。
+fn detect_system_ui_style() -> String {
+    let Ok(text) = fs::read_to_string("/etc/os-release") else {
+        return default_ui_style();
+    };
+    if is_deepin_os_release(&text) {
+        "deepin".into()
+    } else {
+        default_ui_style()
+    }
+}
+
+/// 判断 os-release 内容是否属于 deepin 系发行版。
+///
+/// 值可能带引号（`ID_LIKE="debian deepin"`），按空白拆词后逐词比对；
+/// 只看 `ID` / `ID_LIKE`，避免 `PRETTY_NAME` 等描述性字段误命中。
+fn is_deepin_os_release(text: &str) -> bool {
+    text.lines()
+        .filter_map(|line| line.split_once('='))
+        .filter(|(key, _)| matches!(*key, "ID" | "ID_LIKE"))
+        .any(|(_, value)| {
+            let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
+            value.split_whitespace().any(|word| word.eq_ignore_ascii_case("deepin"))
+        })
 }
 
 /// 老配置里没有 `locale` 字段时的兜底。
@@ -138,7 +172,7 @@ impl Default for Settings {
             routes: RouteConfig::default(),
             start_client_on_launch: false,
             stop_client_on_exit: false,
-            ui_style: default_ui_style(),
+            ui_style: detect_system_ui_style(),
             locale: detect_system_locale(),
         }
     }
@@ -867,7 +901,7 @@ mod tests {
         assert_eq!(loaded.routes.subnets.len(), 3);
         assert!(loaded.notifications);
         assert_eq!(loaded.routes.mtu, 1400);
-        assert_eq!(loaded.ui_style, "win11");
+        assert_eq!(loaded.ui_style, settings.ui_style);
         // locale 首次安装时按系统语言探测，测试环境不假定具体取值，只要求往返一致
         assert_eq!(loaded.locale, settings.locale);
         // 老配置文件里没有 uiStyle / locale 字段，缺省是 win11 / zh
@@ -897,6 +931,17 @@ mod tests {
         ] {
             assert!(!is_mainland_china_locale(value), "{value} 不应判为中国大陆");
         }
+    }
+
+    #[test]
+    fn deepin_os_release_is_recognized() {
+        assert!(is_deepin_os_release("NAME=\"deepin\"\nID=deepin\n"));
+        assert!(is_deepin_os_release("ID=deepin\nID_LIKE=debian\n"));
+        assert!(is_deepin_os_release("ID=myos\nID_LIKE=\"debian deepin\"\n"));
+        // PRETTY_NAME 之类的描述字段不算发行版标识
+        assert!(!is_deepin_os_release("ID=debian\nPRETTY_NAME=\"Debian GNU/Linux (deepin-like)\"\n"));
+        assert!(!is_deepin_os_release("ID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"22.04\"\n"));
+        assert!(!is_deepin_os_release(""));
     }
 
     #[test]
