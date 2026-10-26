@@ -716,6 +716,15 @@ async function save() {
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
   text-align: left;
+  /* button 全局是 nowrap；这里带说明文字，必须允许换行，否则会溢出卡片 */
+  white-space: normal;
+}
+
+/* 说明文字撑满卡片宽度并允许任意位置断行，避免长中文/英文溢出边框 */
+.style-card .hint {
+  align-self: stretch;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .style-card:hover {
@@ -870,6 +879,8 @@ async function save() {
   border-radius: var(--radius-ctl);
   cursor: pointer;
   transition: border-color 0.12s ease, background 0.12s ease;
+  /* 同样覆盖 button 的 nowrap，说明文字要在卡片内换行 */
+  white-space: normal;
 }
 
 .source-card:hover {

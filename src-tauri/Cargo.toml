@@ -27,6 +27,22 @@ thiserror = "2"
 regex = "1"
 chrono = { version = "0.4", features = ["clock"] }
 
+# Linux 上 tray-icon 默认走 libappindicator 后端，它只把菜单挂成 dbusmenu、
+# 从不实现 StatusNotifierItem 的 Activate。结果是 DDE/KDE 里左键点托盘图标
+# 只会收到 UnknownMethod，TrayIconEvent 一次都不派发 —— main.rs 里那段
+# Click{Left, Up} 分支在 Linux 上是死代码，窗口永远打不开。
+#
+# 这里显式引入 ksni 后端：Cargo 的 feature 是并集，而 tray-icon 的 gtk 分支
+# 条件带 `not(feature = "ksni")`，所以只要 ksni 被启用就会切到真正的 SNI
+# 实现，它的 activate() 会派发 TrayIconEvent::Click{ button: Left, ... }。
+tray-icon = { version = "0.25", default-features = false, features = ["ksni", "serde"] }
+
+# vendor/tray-icon 是本项目对上游的补丁副本，只改了一处：ksni 后端补上 SNI 的
+# `IconName`（上游只发 IconPixmap，Deepin 的托盘不认，图标会整块消失）。
+# 上游合并这条改动后删掉整个 [patch] 段并去掉 vendor/tray-icon 即可。
+[patch.crates-io]
+tray-icon = { path = "../vendor/tray-icon" }
+
 [profile.release]
 lto = true
 codegen-units = 1

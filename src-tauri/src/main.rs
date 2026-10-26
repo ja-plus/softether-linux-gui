@@ -989,6 +989,10 @@ async fn quit_app(app: AppHandle) -> Result<(), String> {
 }
 
 fn main() {
+    // 让托盘图标同时以「图标主题名」发布（见 vendor/tray-icon 的 patch）。
+    // deb 把图标装在 /usr/share/icons/hicolor/*/apps/softether-tray.png，
+    // 所以这个名字与打包产物自洽；DDE 只认 IconName，不给就不渲染图标。
+    std::env::set_var("TRAY_ICON_NAME", "softether-tray");
     let initial = Settings::load();
     softether_tray_lib::i18n::set_locale(&initial.locale);
     tauri::Builder::default()
