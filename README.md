@@ -46,6 +46,8 @@ Reading status uses the current user's `vpncmd`. Changing routes, starting the s
 
 ## Development
 
+This project was developed with assistance from AI tools.
+
 ```bash
 npm install
 npm run tauri dev

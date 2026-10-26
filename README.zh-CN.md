@@ -46,6 +46,8 @@ vpn-tracy
 
 ## 开发
 
+本项目在开发过程中使用了 AI 工具协助完成。
+
 ```bash
 npm install
 npm run tauri dev

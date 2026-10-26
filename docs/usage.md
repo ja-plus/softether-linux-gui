@@ -139,11 +139,11 @@ The SoftEther Linux client is a **long-running root daemon** (two `vpnclient exe
 | Setting | Effect |
 |---|---|
 | Start the client service when the app starts | Automatically brings up `vpnclient` when the app opens (skipped if the service is already running) |
-| Stop the client service when the app exits | Stops the client when the app closes |
+| Stop the client service when the app exits | Disconnects the active VPN and also stops the client service |
 
 Checking both = **the client follows the app: up with it, down with it**.
 
-**Only a client started by this app gets stopped on exit.** When the app actually starts the client it leaves a flag at `~/.config/softether-tray/client-managed.flag`; a `vpnclient` you started yourself in a terminal is never stopped by the app, so nobody else's connection gets cut by accident. Clicking "Stop service" manually clears the flag as well.
+The app always disconnects the active VPN when it actually exits. **Only a client started by this app gets stopped on exit.** When the app actually starts the client it leaves a flag at `~/.config/softether-tray/client-managed.flag`; a `vpnclient` you started yourself in a terminal is never stopped by the app. Clicking "Stop service" manually clears the flag as well.
 
 The flag records **"did this call actually start the client"**, not "is the client running now". The client is a self-daemonizing shared process the user may already have started; writing the flag by the latter rule would take your manually started tunnel down together with the app. So every start path (app launch / clicking Connect / clicking Start service) first checks whether the service is already running and writes nothing if it is.
 
@@ -151,7 +151,7 @@ Stopping the service runs "disconnect accounts → clear routes → stop the cli
 
 **Authorization wait on exit is capped**: without the sudoers whitelist, stopping the client pops one password prompt. On exit the app waits at most 20 seconds, then quits leaving the client still running — quitting is an explicit user intent and should not hang on a password prompt. Clicking "Stop service" in the UI has 120 seconds, plenty of time to type a password.
 
-"Quit" in the tray menu and "Quit app" in the UI run the same teardown logic and behave identically.
+"Quit" in the tray menu, "Quit app" in the UI, and Linux shutdown termination signals use the same teardown logic and disconnect the VPN first. Whether the service also stops remains controlled by the setting above. Closing the window only hides it to the tray.
 
 ### Password-free startup (optional)
 
