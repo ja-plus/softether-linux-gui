@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { Activity, Play } from 'lucide-vue-next'
 import { formatBytes, overview, settings, showToast, type DiagResult } from '../lib/api'
+import { t } from '../lib/i18n'
 
 const target = ref('')
 const count = ref(20)
@@ -33,7 +34,7 @@ async function runCheck() {
       count: Number(count.value) || 20,
     })
     results.value = [result, ...results.value].slice(0, 8)
-    showToast(`${result.target} · 丢包 ${result.lossPercent.toFixed(0)}%`)
+    showToast(t('diag.done', { target: result.target, loss: result.lossPercent.toFixed(0) }))
   } catch (err) {
     error.value = String(err)
   } finally {
@@ -42,11 +43,11 @@ async function runCheck() {
 }
 
 function quality(result: DiagResult): { text: string; tone: string } {
-  if (result.received === 0) return { text: '不可达', tone: 'bad' }
-  if (result.lossPercent >= 5) return { text: '丢包严重', tone: 'bad' }
-  if (result.lossPercent > 0) return { text: '有丢包', tone: 'warn' }
-  if ((result.rttAvgMs ?? 0) > 120) return { text: '延迟偏高', tone: 'warn' }
-  return { text: '正常', tone: 'ok' }
+  if (result.received === 0) return { text: t('diag.unreachable'), tone: 'bad' }
+  if (result.lossPercent >= 5) return { text: t('diag.severeLoss'), tone: 'bad' }
+  if (result.lossPercent > 0) return { text: t('diag.lossy'), tone: 'warn' }
+  if ((result.rttAvgMs ?? 0) > 120) return { text: t('diag.highLatency'), tone: 'warn' }
+  return { text: t('diag.normal'), tone: 'ok' }
 }
 </script>
 
@@ -54,9 +55,9 @@ function quality(result: DiagResult): { text: string; tone: string } {
   <section class="diag">
     <header class="head">
       <div>
-        <h1>网络诊断</h1>
+        <h1>{{ t('diag.title') }}</h1>
         <p class="hint">
-          通过系统 ping 检查隧道质量。丢包和延迟都只代表 ICMP，不等于 TCP 业务的体感；但它能快速区分“隧道坏了”和“服务端慢”。
+          {{ t('diag.subtitle') }}
         </p>
       </div>
     </header>
@@ -64,41 +65,43 @@ function quality(result: DiagResult): { text: string; tone: string } {
     <div class="card panel">
       <div class="row">
         <div class="field" style="flex: 1">
-          <label>目标地址</label>
-          <input v-model="target" type="text" placeholder="例如 10.10.4.160" />
+          <label>{{ t('diag.target') }}</label>
+          <input v-model="target" type="text" :placeholder="t('diag.targetPlaceholder')" />
         </div>
         <div class="field" style="width: 110px">
-          <label>次数</label>
+          <label>{{ t('diag.count') }}</label>
           <input v-model.number="count" type="number" min="1" max="100" />
         </div>
         <button class="primary" :disabled="running || !target.trim()" @click="runCheck">
-          <Play :size="14" /> {{ running ? '检测中…' : '开始检测' }}
+          <Play :size="14" /> {{ running ? t('diag.running') : t('diag.start') }}
         </button>
       </div>
       <p class="hint" style="margin: 10px 0 0">
-        {{ iface ? `当前经 ${iface}（${overview?.ifaceIpv4 ?? '无 IP'}，MTU ${overview?.ifaceMtu ?? '—'}）` : '当前没有 VPN 隧道，检测的是本地网络' }}
+        {{ iface
+          ? t('diag.currentVia', { iface, ip: overview?.ifaceIpv4 ?? t('common.noIp'), mtu: overview?.ifaceMtu ?? '—' })
+          : t('diag.noTunnel') }}
       </p>
       <p v-if="error" class="error">{{ error }}</p>
     </div>
 
     <div class="card results">
       <header class="list-head">
-        <h2>最近结果</h2>
-        <span class="hint">{{ results.length }} 条</span>
+        <h2>{{ t('diag.recent') }}</h2>
+        <span class="hint">{{ t('diag.countLabel', { n: results.length }) }}</span>
       </header>
       <div v-if="!results.length" class="empty">
         <Activity :size="20" class="empty-icon" />
-        <p class="muted">还没有检测结果。输入公司内网地址开始。</p>
+        <p class="muted">{{ t('diag.empty') }}</p>
       </div>
       <table v-else>
         <thead>
           <tr>
-            <th>目标</th>
-            <th>质量</th>
-            <th class="num">丢包</th>
-            <th class="num">平均</th>
-            <th class="num">最小 / 最大</th>
-            <th class="num">收 / 发</th>
+            <th>{{ t('diag.targetCol') }}</th>
+            <th>{{ t('diag.qualityCol') }}</th>
+            <th class="num">{{ t('diag.lossCol') }}</th>
+            <th class="num">{{ t('diag.avgCol') }}</th>
+            <th class="num">{{ t('diag.minmaxCol') }}</th>
+            <th class="num">{{ t('diag.packetsCol') }}</th>
           </tr>
         </thead>
         <tbody>
@@ -117,12 +120,12 @@ function quality(result: DiagResult): { text: string; tone: string } {
     </div>
 
     <div class="card tips">
-      <h2>怎么看这些数</h2>
+      <h2>{{ t('diag.tipsTitle') }}</h2>
       <ul class="hint">
-        <li>ICMP 0% 丢包但网页很慢 → 问题在 TCP 建连或服务端，不在带宽。</li>
-        <li>ICMP 稳定丢包且延迟抖动 → 先在本地网关复测，再测 VPN 服务器外层地址，最后测内网目标。</li>
-        <li>大包失败、小包正常 → MTU 不匹配，降低隧道 MTU 再测一次。</li>
-        <li>累计流量 {{ formatBytes(overview?.snapshot?.rxBytes ?? 0) }} 下载 / {{ formatBytes(overview?.snapshot?.txBytes ?? 0) }} 上传。</li>
+        <li>{{ t('diag.tip1') }}</li>
+        <li>{{ t('diag.tip2') }}</li>
+        <li>{{ t('diag.tip3') }}</li>
+        <li>{{ t('diag.tip4', { rx: formatBytes(overview?.snapshot?.rxBytes ?? 0), tx: formatBytes(overview?.snapshot?.txBytes ?? 0) }) }}</li>
       </ul>
     </div>
   </section>

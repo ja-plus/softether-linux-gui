@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { t } from '../lib/i18n'
 
 const props = defineProps<{
   values: number[]
@@ -39,7 +40,7 @@ const area = computed(() => {
     class="spark"
     :class="tone ?? 'accent'"
     role="img"
-    aria-label="最近 80 秒速率"
+    :aria-label="t('sparkline.aria')"
   >
     <path v-if="area" :d="area" class="area" />
     <path v-if="path" :d="path" class="line" fill="none" stroke-width="1.5" stroke-linejoin="round" />

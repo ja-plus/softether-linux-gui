@@ -3,12 +3,22 @@ export interface SelectOption<T> {
   label: string
   value: T
   disabled?: boolean
+  /**
+   * 第二行小字：用于放路径、版本这类长文本。
+   *
+   * 不能塞进 label —— 触发器只有一行，长路径会把版本号挤掉，
+   * 用户就分不清两条候选的区别了。
+   */
+  hint?: string
+  /** 第三条徽标，如「当前使用」；纯装饰，不参与选择逻辑 */
+  tag?: string
 }
 </script>
 
 <script setup lang="ts" generic="T">
 import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
 import { Check, ChevronDown } from 'lucide-vue-next'
+import { t } from '../lib/i18n'
 
 const props = defineProps<{
   options: SelectOption<T>[]
@@ -27,13 +37,16 @@ const popStyle = ref<Record<string, string>>({})
 const currentLabel = computed(() => {
   const match = props.options.find((option) => option.value === model.value)
   if (match) return match.label
-  if (isEmpty(model.value)) return props.placeholder ?? '请选择'
+  if (isEmpty(model.value)) return props.placeholder ?? t('common.selectPlaceholder')
   return String(model.value)
 })
 
 const showPlaceholder = computed(
   () => isEmpty(model.value) && !props.options.some((option) => option.value === model.value),
 )
+
+/** 触发器上显示的副标题：选中项的 hint，没有就不占位 */
+const currentHint = computed(() => props.options.find((option) => option.value === model.value)?.hint)
 
 function isEmpty(value: unknown): boolean {
   return value === null || value === undefined || value === ''
@@ -187,6 +200,7 @@ function onKeydown(event: KeyboardEvent) {
       @keydown="onKeydown"
     >
       <span class="label">{{ currentLabel }}</span>
+      <span v-if="currentHint" class="label-hint mono">{{ currentHint }}</span>
       <ChevronDown :size="14" class="chevron" />
     </button>
     <Teleport to="body">
@@ -204,10 +218,16 @@ function onKeydown(event: KeyboardEvent) {
           @mouseenter="!option.disabled && (activeIndex = index)"
           @click="pick(index)"
         >
-          <span class="option-label">{{ option.label }}</span>
+          <span class="option-body">
+            <span class="option-label">
+              {{ option.label }}
+              <span v-if="option.tag" class="option-tag">{{ option.tag }}</span>
+            </span>
+            <span v-if="option.hint" class="option-hint mono">{{ option.hint }}</span>
+          </span>
           <Check v-if="option.value === model" :size="14" class="check" />
         </button>
-        <p v-if="!options.length" class="empty">{{ placeholder ?? '暂无可选项' }}</p>
+        <p v-if="!options.length" class="empty">{{ placeholder ?? t('common.noOptions') }}</p>
       </div>
     </Teleport>
   </div>
@@ -259,6 +279,20 @@ function onKeydown(event: KeyboardEvent) {
   color: var(--text-hint);
 }
 
+/*
+ * 触发器上的副标题：长路径必然被截断，这是有意的——
+ * 完整路径在下拉里第二行给，触发器只保证"能区分两条候选"。
+ */
+.label-hint {
+  flex: none;
+  max-width: 55%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 11.5px;
+  color: var(--text-hint);
+}
+
 .chevron {
   flex: none;
   color: var(--text-hint);
@@ -303,6 +337,40 @@ function onKeydown(event: KeyboardEvent) {
 .option.selected {
   background: var(--accent-soft);
   color: var(--accent);
+}
+
+/* 两行式选项：label 在上，路径/版本在下 */
+.option-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.option-hint {
+  font-size: 11.5px;
+  color: var(--text-hint);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.option.selected .option-hint {
+  color: var(--accent-ink);
+  opacity: 0.75;
+}
+
+.option-tag {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--ok-soft);
+  border: 0.5px solid var(--ok-line);
+  color: var(--ok);
+  font-size: 10.5px;
+  font-weight: 500;
+  vertical-align: 1px;
 }
 
 .option:disabled {

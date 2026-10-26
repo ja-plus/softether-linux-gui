@@ -2,6 +2,7 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Copy, Minus, Square, X } from 'lucide-vue-next'
+import { t } from '../lib/i18n'
 
 const maximized = ref(false)
 let unlisten: (() => void) | null = null
@@ -49,18 +50,18 @@ function toggleMaximize(event: MouseEvent) {
     <span class="mark">SE</span>
     <span class="title">SoftEther Tray</span>
     <div class="caption">
-      <button class="cap-btn" aria-label="最小化" @click="withWindow((win) => win.minimize())">
+      <button class="cap-btn" :aria-label="t('titlebar.minimize')" @click="withWindow((win) => win.minimize())">
         <Minus :size="13" :stroke-width="1.6" />
       </button>
       <button
         class="cap-btn"
-        :aria-label="maximized ? '还原' : '最大化'"
+        :aria-label="maximized ? t('titlebar.restore') : t('titlebar.maximize')"
         @click="withWindow((win) => win.toggleMaximize())"
       >
         <Copy v-if="maximized" :size="11" :stroke-width="1.6" />
         <Square v-else :size="11" :stroke-width="1.6" />
       </button>
-      <button class="cap-btn close" aria-label="关闭" @click="withWindow((win) => win.close())">
+      <button class="cap-btn close" :aria-label="t('titlebar.close')" @click="withWindow((win) => win.close())">
         <X :size="13" :stroke-width="1.6" />
       </button>
     </div>

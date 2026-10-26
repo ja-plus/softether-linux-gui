@@ -10,6 +10,7 @@ use tauri::{
 use tauri_plugin_notification::NotificationExt;
 
 use softether_tray_lib::accounts::{self, AccountInput};
+use softether_tray_lib::client_dir::{self, ClientCandidate};
 use softether_tray_lib::settings::{self, Settings};
 use softether_tray_lib::softether::{AccountDetail, DiagResult, NicInfo};
 use softether_tray_lib::vpn::{self, Overview};
@@ -27,7 +28,9 @@ fn state_settings(state: &State<AppState>) -> Settings {
 
 fn store_settings(state: &State<AppState>, settings: Settings) -> Result<(), String> {
     settings.save()?;
-    *state.settings.lock().map_err(|_| "设置锁被占用".to_string())? = settings;
+    *state.settings.lock().map_err(|_| {
+        softether_tray_lib::i18n::tr("设置锁被占用", "The settings lock is busy").to_string()
+    })? = settings;
     Ok(())
 }
 
@@ -37,19 +40,31 @@ fn notify(app: &AppHandle, settings: &Settings, title: &str, body: &str) {
     }
     // 通知失败不能影响连接动作本身，所以只记不抛。
     if let Err(error) = app.notification().builder().title(title).body(body).show() {
-        let _ = app.emit("action-error", format!("桌面通知发送失败（连接本身已完成）: {error}"));
+        let message = if softether_tray_lib::i18n::is_en() {
+            format!("Failed to show the desktop notification (the connection itself completed): {error}")
+        } else {
+            format!("桌面通知发送失败（连接本身已完成）: {error}")
+        };
+        let _ = app.emit("action-error", message);
     }
 }
 
 fn tray_status_text(overview: &Overview) -> String {
+    let en = softether_tray_lib::i18n::is_en();
     match overview.snapshot.as_ref().filter(|s| s.connected) {
         Some(snapshot) => {
             let iface = overview.iface.clone().unwrap_or_else(|| "vpn".into());
             let mtu = overview.iface_mtu.map(|m| format!(" · MTU {m}")).unwrap_or_default();
-            format!("● {} 已连接 · {}{}", snapshot.name, iface, mtu)
+            if en {
+                format!("● {} connected · {}{}", snapshot.name, iface, mtu)
+            } else {
+                format!("● {} 已连接 · {}{}", snapshot.name, iface, mtu)
+            }
         }
-        None if overview.service_running => "○ 未连接".to_string(),
-        None => "○ VPN 服务未运行".to_string(),
+        None if overview.service_running => {
+            softether_tray_lib::i18n::tr("○ 未连接", "○ Disconnected").to_string()
+        }
+        None => softether_tray_lib::i18n::tr("○ VPN 服务未运行", "○ VPN service not running").to_string(),
     }
 }
 
@@ -59,13 +74,25 @@ fn rebuild_tray(app: &AppHandle, overview: &Overview) -> tauri::Result<()> {
 
     let status_text = tray_status_text(overview);
     let tooltip = connected
-        .map(|snapshot| format!("SoftEther VPN · {} 已连接", snapshot.name))
-        .unwrap_or_else(|| "SoftEther VPN · 未连接".to_string());
+        .map(|snapshot| {
+            if softether_tray_lib::i18n::is_en() {
+                format!("SoftEther VPN · {} connected", snapshot.name)
+            } else {
+                format!("SoftEther VPN · {} 已连接", snapshot.name)
+            }
+        })
+        .unwrap_or_else(|| {
+            softether_tray_lib::i18n::tr("SoftEther VPN · 未连接", "SoftEther VPN · Disconnected")
+                .to_string()
+        });
 
     // 菜单项先算成 (id, label) 列表：签名要拿它们比对，没变就整轮跳过重建
     let mut account_items: Vec<(String, String)> = Vec::new();
     if overview.accounts.is_empty() {
-        account_items.push(("no-account".into(), "（还没有连接配置）".into()));
+        account_items.push((
+            "no-account".into(),
+            softether_tray_lib::i18n::tr("（还没有连接配置）", "(No connection profiles)").into(),
+        ));
     }
     let mut seen = HashSet::new();
     for account in &overview.accounts {
@@ -73,14 +100,25 @@ fn rebuild_tray(app: &AppHandle, overview: &Overview) -> tauri::Result<()> {
             continue;
         }
         let is_up = softether_tray_lib::softether::status_is_connected(&account.status);
-        let label = if is_up { format!("断开 {}", account.name) } else { format!("连接 {}", account.name) };
+        let label = if is_up {
+            if softether_tray_lib::i18n::is_en() {
+                format!("Disconnect {}", account.name)
+            } else {
+                format!("断开 {}", account.name)
+            }
+        } else if softether_tray_lib::i18n::is_en() {
+            format!("Connect {}", account.name)
+        } else {
+            format!("连接 {}", account.name)
+        };
         let id = if is_up { format!("disconnect:{}", account.name) } else { format!("connect:{}", account.name) };
         account_items.push((id, label));
     }
 
-    // 状态行、tooltip、账户项就是菜单的全部可变内容；逐字比对即可
+    // 状态行、tooltip、账户项就是菜单的全部可变内容；语言变化也必须触发重建
     let signature = format!(
-        "{status_text}\n{tooltip}\n{}",
+        "{}\n{status_text}\n{tooltip}\n{}",
+        softether_tray_lib::i18n::current(),
         account_items.iter().map(|(id, label)| format!("{id}={label}")).collect::<Vec<_>>().join("\n")
     );
     let unchanged = app
@@ -95,10 +133,28 @@ fn rebuild_tray(app: &AppHandle, overview: &Overview) -> tauri::Result<()> {
 
     let title = MenuItem::with_id(&handle, "title", "SoftEther Tray", false, None::<&str>)?;
     let status = MenuItem::with_id(&handle, "status", status_text, false, None::<&str>)?;
-    let open = MenuItem::with_id(&handle, "open", "打开主窗口", true, None::<&str>)?;
+    let open = MenuItem::with_id(
+        &handle,
+        "open",
+        softether_tray_lib::i18n::tr("打开主窗口", "Open main window"),
+        true,
+        None::<&str>,
+    )?;
     let separator = || PredefinedMenuItem::separator(&handle);
-    let diag = MenuItem::with_id(&handle, "diag", "网络诊断…", true, None::<&str>)?;
-    let quit = MenuItem::with_id(&handle, "quit", "退出 SoftEther Tray", true, None::<&str>)?;
+    let diag = MenuItem::with_id(
+        &handle,
+        "diag",
+        softether_tray_lib::i18n::tr("网络诊断…", "Network diagnostics…"),
+        true,
+        None::<&str>,
+    )?;
+    let quit = MenuItem::with_id(
+        &handle,
+        "quit",
+        softether_tray_lib::i18n::tr("退出 SoftEther Tray", "Quit SoftEther Tray"),
+        true,
+        None::<&str>,
+    )?;
 
     let mut items: Vec<Box<dyn tauri::menu::IsMenuItem<tauri::Wry>>> = Vec::new();
     items.push(Box::new(title));
@@ -159,7 +215,7 @@ fn shutdown_client(app: &AppHandle) {
     // 仅在「客户端由本应用拉起」且用户设置了随应用退出时，才停客户端；
     // 用户自己先开着的 vpnclient 不动，否则退出应用会把别人的连接一起断掉。
     if settings.stop_client_on_exit && vpn::managed_by_app() && vpn::service_running() {
-        let overview = vpn::read_overview(&settings);
+        let overview = vpn::read_overview_fresh(&settings);
         if let Some(name) = vpn::active_account(&settings, &overview.accounts) {
             let _ = do_disconnect(app, &name);
         }
@@ -190,9 +246,17 @@ fn handle_menu(app: &AppHandle, id: &str) {
     }
 }
 
+/// 轮询路径：允许用短缓存，避免每 2 秒为一堆不变的数据反复冷启动 vpncmd。
 fn current_overview(app: &AppHandle) -> Overview {
     let settings = state_settings(&app.state::<AppState>());
     vpn::read_overview(&settings)
+}
+
+/// 动作路径：忽略缓存。连接/断开之后必须看到真实结果，不能把动作之前的
+/// 快照当成结果回填给界面。
+fn fresh_overview(app: &AppHandle) -> Overview {
+    let settings = state_settings(&app.state::<AppState>());
+    vpn::read_overview_fresh(&settings)
 }
 
 /// 把一份现成的 Overview 同步到托盘与前端。
@@ -202,10 +266,10 @@ fn publish_with(app: &AppHandle, overview: &Overview) {
 }
 
 /// 读一份最新状态并广播出去，把同一份结果交给调用方复用。
-/// 一次 read_overview 要串行跑好几个子进程（vpncmd ×3、ip、pgrep），
+/// 一次 read_overview_fresh 要串行跑好几个子进程（vpncmd ×3、ip、pgrep），
 /// 谁都不许再单独读第二遍——那会在同一次操作里把整套开销翻倍。
 fn publish(app: &AppHandle) -> Overview {
-    let overview = current_overview(app);
+    let overview = fresh_overview(app);
     publish_with(app, &overview);
     overview
 }
@@ -219,13 +283,20 @@ fn report_error(app: &AppHandle, title: &str, error: &str) {
 fn connect_account(app: &AppHandle, name: String) {
     match do_connect(app, &name) {
         Ok(overview) => {
-            let body = overview.iface_ipv4.clone().unwrap_or_else(|| "已建立隧道".into());
+            let body = overview.iface_ipv4.clone().unwrap_or_else(|| {
+                softether_tray_lib::i18n::tr("已建立隧道", "Tunnel established").to_string()
+            });
             let settings = state_settings(&app.state::<AppState>());
-            notify(app, &settings, "VPN 已连接", &format!("{name} · {body}"));
+            notify(
+                app,
+                &settings,
+                softether_tray_lib::i18n::tr("VPN 已连接", "VPN connected"),
+                &format!("{name} · {body}"),
+            );
             publish_with(app, &overview);
         }
         Err(error) => {
-            report_error(app, "连接失败", &error);
+            report_error(app, softether_tray_lib::i18n::tr("连接失败", "Connection failed"), &error);
             // 失败时状态可能已经半变，重新读一份再广播
             publish(app);
         }
@@ -236,11 +307,23 @@ fn disconnect_account(app: &AppHandle, name: String) {
     match do_disconnect(app, &name) {
         Ok(overview) => {
             let settings = state_settings(&app.state::<AppState>());
-            notify(app, &settings, "VPN 已断开", &format!("{name} · 已清理网段路由"));
+            notify(
+                app,
+                &settings,
+                softether_tray_lib::i18n::tr("VPN 已断开", "VPN disconnected"),
+                &format!(
+                    "{name} · {}",
+                    softether_tray_lib::i18n::tr("已清理网段路由", "Subnet routes cleaned up")
+                ),
+            );
             publish_with(app, &overview);
         }
         Err(error) => {
-            report_error(app, "断开失败", &error);
+            report_error(
+                app,
+                softether_tray_lib::i18n::tr("断开失败", "Disconnection failed"),
+                &error,
+            );
             publish(app);
         }
     }
@@ -273,7 +356,11 @@ fn do_connect(app: &AppHandle, name: &str) -> Result<Overview, String> {
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
     if !connected {
-        return Err("等待隧道建立超时，请查看客户端日志或网络状态".into());
+        return Err(softether_tray_lib::i18n::tr(
+            "等待隧道建立超时，请查看客户端日志或网络状态",
+            "Timed out waiting for the tunnel; check the client log or network status.",
+        )
+        .into());
     }
 
     // 隧道通了但网卡没地址是 Linux 客户端的常态：它只管链路层，IP 要自己弄。
@@ -283,7 +370,7 @@ fn do_connect(app: &AppHandle, name: &str) -> Result<Overview, String> {
     //   1. 装了 polkit 授权 → `pkexec <helper>`，命中规则时**完全静默**；
     //   2. 没装 → 退回 `pkexec sh -c <内联脚本>`，每次弹一次密码框。
     // 两条路的语义完全一致，helper 只是把同一套 shell 逻辑固化进一个受控入口。
-    let overview = vpn::read_overview(&settings);
+    let overview = vpn::read_overview_fresh(&settings);
     if let Some(iface) = overview.iface.clone() {
         let need_lease = overview.iface_ipv4.is_none();
         let output = if settings::privileged_helper().is_some() {
@@ -300,22 +387,41 @@ fn do_connect(app: &AppHandle, name: &str) -> Result<Overview, String> {
             let script = settings::connect_routes_script(&iface, &settings.routes, need_lease)?;
             settings::run_privileged(&script).map_err(|e| {
                 if need_lease && !settings::has_dhcp_client() {
-                    format!(
-                        "{e}\n系统没有 dhclient/dhcpcd，{iface} 拿不到 IP。\
-                         请安装 DHCP 客户端（sudo apt install isc-dhcp-client），或手动为 {iface} 配静态地址"
-                    )
+                    if softether_tray_lib::i18n::is_en() {
+                        format!(
+                            "{e}\nNo dhclient/dhcpcd is available, so {iface} cannot get an IP. \
+                             Install a DHCP client (sudo apt install isc-dhcp-client) or assign a static address to {iface}."
+                        )
+                    } else {
+                        format!(
+                            "{e}\n系统没有 dhclient/dhcpcd，{iface} 拿不到 IP。\
+                             请安装 DHCP 客户端（sudo apt install isc-dhcp-client），或手动为 {iface} 配静态地址"
+                        )
+                    }
                 } else {
                     e
                 }
             })?
         };
         // 提权跑完再看一眼真实状态，别拿脚本的回显当结论
-        let after = vpn::read_overview(&settings);
+        let after = vpn::read_overview_fresh(&settings);
         if after.iface_ipv4.is_none() {
             let hint = if settings::has_dhcp_client() {
+                if softether_tray_lib::i18n::is_en() {
+                    format!(
+                        "Virtual adapter {iface} still has no IPv4 address (DHCP did not respond). \
+                         Enable the Virtual DHCP Server on the server HUB, or assign a static address and retry."
+                    )
+                } else {
+                    format!(
+                        "虚拟网卡 {iface} 仍未拿到 IPv4（DHCP 没有响应）。请在服务端 HUB 上启用 \
+                         「虚拟 DHCP 服务器」，或手动配置静态地址后重试"
+                    )
+                }
+            } else if softether_tray_lib::i18n::is_en() {
                 format!(
-                    "虚拟网卡 {iface} 仍未拿到 IPv4（DHCP 没有响应）。请在服务端 HUB 上启用 \
-                     「虚拟 DHCP 服务器」，或手动配置静态地址后重试"
+                    "Virtual adapter {iface} has no IPv4 address and no dhclient/dhcpcd is available. \
+                     Install a DHCP client (e.g. sudo apt install isc-dhcp-client) or assign a static address to {iface}."
                 )
             } else {
                 format!(
@@ -327,19 +433,30 @@ fn do_connect(app: &AppHandle, name: &str) -> Result<Overview, String> {
             return Err(hint);
         }
         if output.contains("NO_GATEWAY") {
-            return Err(format!("无法确定 {iface} 的隧道网关，路由未下发"));
+            return Err(if softether_tray_lib::i18n::is_en() {
+                format!("Cannot determine the tunnel gateway for {iface}; routes were not installed.")
+            } else {
+                format!("无法确定 {iface} 的隧道网关，路由未下发")
+            });
         }
     }
-    Ok(vpn::read_overview(&settings))
+    Ok(vpn::read_overview_fresh(&settings))
 }
 
 /// helper 报 NoDhcpClient 或连接时缺 DHCP 客户端，都该给出可操作的安装提示。
 fn decorate_dhcp_error(message: String, iface: &str, need_lease: bool) -> String {
     if need_lease && !settings::has_dhcp_client() {
-        format!(
-            "{message}\n系统没有 dhclient/dhcpcd，{iface} 拿不到 IP。\
-             请安装 DHCP 客户端（sudo apt install isc-dhcp-client），或手动为 {iface} 配静态地址"
-        )
+        if softether_tray_lib::i18n::is_en() {
+            format!(
+                "{message}\nNo dhclient/dhcpcd is available, so {iface} cannot get an IP. \
+                 Install a DHCP client (sudo apt install isc-dhcp-client) or assign a static address to {iface}."
+            )
+        } else {
+            format!(
+                "{message}\n系统没有 dhclient/dhcpcd，{iface} 拿不到 IP。\
+                 请安装 DHCP 客户端（sudo apt install isc-dhcp-client），或手动为 {iface} 配静态地址"
+            )
+        }
     } else {
         message
     }
@@ -362,7 +479,7 @@ fn do_disconnect(app: &AppHandle, name: &str) -> Result<Overview, String> {
     //
     // 注意这里读的是断开**之后**的状态：断之前网卡上必然有路由和地址，
     // 拿那个去判断等于永远要提权。
-    if let Some(iface) = vpn::read_overview(&settings).iface {
+    if let Some(iface) = vpn::read_overview_fresh(&settings).iface {
         if settings::needs_disconnect_cleanup(&iface) {
             // 与连接一致：装了 helper 就走 helper（静默），否则退回内联脚本
             let result = if settings::privileged_helper().is_some() {
@@ -382,11 +499,18 @@ fn do_disconnect(app: &AppHandle, name: &str) -> Result<Overview, String> {
             };
             if let Err(err) = result {
                 // 清理失败只提示，不改变"已断开"这个结论
-                eprintln!("断开后的路由清理未完成: {err}");
+                eprintln!(
+                    "{}",
+                    if softether_tray_lib::i18n::is_en() {
+                        format!("Post-disconnect route cleanup did not finish: {err}")
+                    } else {
+                        format!("断开后的路由清理未完成: {err}")
+                    }
+                );
             }
         }
     }
-    Ok(vpn::read_overview(&settings))
+    Ok(vpn::read_overview_fresh(&settings))
 }
 
 #[derive(Serialize)]
@@ -398,7 +522,8 @@ struct EnvInfo {
 
 #[tauri::command]
 async fn get_overview(app: AppHandle) -> Result<Overview, String> {
-    Ok(current_overview(&app))
+    // 首屏要准：宁可付一次完整读取的代价，也不能让用户先看到 30 秒前的账号清单
+    Ok(fresh_overview(&app))
 }
 
 #[tauri::command]
@@ -441,7 +566,7 @@ async fn start_service(app: AppHandle) -> Result<Overview, String> {
 #[tauri::command]
 async fn stop_service(app: AppHandle) -> Result<Overview, String> {
     let settings = state_settings(&app.state::<AppState>());
-    let overview = vpn::read_overview(&settings);
+    let overview = vpn::read_overview_fresh(&settings);
     if let Some(name) = vpn::active_account(&settings, &overview.accounts) {
         // 断开失败不阻断停机：客户端一停，隧道必然消失，后续清理由 stop_service 兜底
         let _ = do_disconnect(&app, &name);
@@ -456,8 +581,9 @@ fn client_managed() -> bool {
     vpn::managed_by_app()
 }
 
-/// 轮询状态。read_overview 是一串子进程（vpncmd ×3、ip、pgrep），必须放阻塞线程池：
-/// 同步命令在主线程内联执行，每 2 秒一次的轮询会把界面整段冻住。
+/// 轮询状态。稳态下只读缓存 + sysfs（零子进程），只有缓存过期的那一轮才会
+/// 冷启动 vpncmd。即便如此也必须放阻塞线程池：同步命令在主线程内联执行，
+/// 一旦碰上"这一轮要真读"的那一刻，界面就会整段冻住。
 #[tauri::command]
 async fn refresh(app: AppHandle) -> Result<Overview, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -468,7 +594,13 @@ async fn refresh(app: AppHandle) -> Result<Overview, String> {
         overview
     })
     .await
-    .map_err(|e| format!("刷新状态失败: {e}"))
+    .map_err(|e| {
+        if softether_tray_lib::i18n::is_en() {
+            format!("Failed to refresh status: {e}")
+        } else {
+            format!("刷新状态失败: {e}")
+        }
+    })
 }
 
 #[tauri::command]
@@ -482,9 +614,113 @@ async fn save_settings(app: AppHandle, settings: Settings) -> Result<Settings, S
         settings::validate_subnet(subnet)?;
     }
     settings::validate_mtu(settings.routes.mtu)?;
+    validate_client_choice(&settings)?;
     store_settings(&app.state::<AppState>(), settings.clone())?;
+    softether_tray_lib::i18n::set_locale(&settings.locale);
     publish(&app);
     Ok(settings)
+}
+
+/// 保存前校验「来源 + 目录」这一对是否自洽。
+///
+/// 刻意允许「目录当前不可用」通过校验中的一部分情况：用户可能在
+/// 客户端还没装好时就把设置填了。但**来源与目录的组合必须说得通**，
+/// 否则保存进去的就是一份自相矛盾的配置，之后连接报的错会莫名其妙。
+fn validate_client_choice(settings: &Settings) -> Result<(), String> {
+    let source = settings
+        .client_source
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let Some(source) = source else { return Ok(()) };
+    let parsed = softether_tray_lib::client_dir::ClientSource::parse(source).ok_or_else(|| {
+        if softether_tray_lib::i18n::is_en() {
+            format!("Unknown client source: {source}")
+        } else {
+            format!("未知的客户端来源：{source}")
+        }
+    })?;
+    let dir = settings.vpn_dir.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    match parsed {
+        // 内置不看路径，存了也用不上
+        softether_tray_lib::client_dir::ClientSource::Bundled => Ok(()),
+        // 选「扫到的」/「自己指定」却没地址 = 保存后连接必然报错，当场拦下来
+        softether_tray_lib::client_dir::ClientSource::Detected => {
+            if dir.is_none() {
+                return Err(softether_tray_lib::i18n::tr(
+                    "已选择「搜索到的目录」，请先挑一个具体目录",
+                    "A detected directory is selected; choose a specific directory first.",
+                )
+                .into());
+            }
+            Ok(())
+        }
+        softether_tray_lib::client_dir::ClientSource::Custom => {
+            if dir.is_none() {
+                return Err(softether_tray_lib::i18n::tr(
+                    "已选择「自己指定目录」，请填写路径",
+                    "A custom directory is selected; enter a path.",
+                )
+                .into());
+            }
+            Ok(())
+        }
+    }
+}
+
+/// 列出所有可用的客户端目录（内置 / 扫到的 / 用户指定的）。
+///
+/// 扫盘是 IO 密集的，所以放在 async + spawn_blocking 里，
+/// 避免用户点开设置页时把 UI 线程卡住。
+#[tauri::command]
+async fn list_client_candidates(app: AppHandle) -> Result<Vec<ClientCandidate>, String> {
+    let settings = state_settings(&app.state::<AppState>());
+    let custom = settings.vpn_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || client_dir::candidates(custom.as_deref()))
+        .await
+        .map_err(|e| {
+            if softether_tray_lib::i18n::is_en() {
+                format!("Failed to scan client directories: {e}")
+            } else {
+                format!("扫描客户端目录失败: {e}")
+            }
+        })
+}
+
+/// 单独体检一个用户手填的目录，给「校验」按钮用。
+///
+/// 和 list_client_candidates 分开，是为了让用户可以只验那一个路径，
+/// 不必等一遍扫盘。
+#[tauri::command]
+async fn validate_client_dir(dir: String) -> Result<ClientCandidate, String> {
+    let trimmed = dir.trim().to_string();
+    if trimmed.is_empty() {
+        return Err(softether_tray_lib::i18n::tr(
+            "请先填写目录路径",
+            "Enter a directory path first.",
+        )
+        .into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = std::path::PathBuf::from(&trimmed);
+        let mut candidate = client_dir::inspect(&path, client_dir::ClientSource::Custom);
+        if !path.is_dir() {
+            candidate.usable = false;
+            candidate.problem = Some(
+                softether_tray_lib::i18n::tr("目录不存在", "Directory does not exist").into(),
+            );
+            candidate.version = None;
+        }
+        candidate
+    })
+    .await
+    .map_err(|e| {
+        if softether_tray_lib::i18n::is_en() {
+            format!("Failed to validate the directory: {e}")
+        } else {
+            format!("校验目录失败: {e}")
+        }
+    })
 }
 
 #[tauri::command]
@@ -517,14 +753,20 @@ async fn delete_account(app: AppHandle, name: String) -> Result<Overview, String
 async fn create_nic(app: AppHandle, name: String) -> Result<Vec<NicInfo>, String> {
     let settings = state_settings(&app.state::<AppState>());
     accounts::create_nic(&settings, &name)?;
-    Ok(vpn::read_overview(&settings).nics)
+    Ok(vpn::read_overview_fresh(&settings).nics)
 }
 
 #[tauri::command]
 async fn run_diagnostics(target: String, count: u32) -> Result<DiagResult, String> {
     tauri::async_runtime::spawn_blocking(move || accounts::ping(&target, count))
         .await
-        .map_err(|e| format!("诊断任务失败: {e}"))?
+        .map_err(|e| {
+            if softether_tray_lib::i18n::is_en() {
+                format!("Diagnostics task failed: {e}")
+            } else {
+                format!("诊断任务失败: {e}")
+            }
+        })?
 }
 
 /// 单个网段的验证结果。
@@ -558,18 +800,29 @@ struct RouteReport {
 #[tauri::command]
 async fn verify_routes(app: AppHandle) -> Result<RouteReport, String> {
     let settings = state_settings(&app.state::<AppState>());
-    let overview = vpn::read_overview(&settings);
-    let iface = overview
-        .iface
-        .clone()
-        .ok_or_else(|| "没有找到虚拟网卡，请先连接 VPN".to_string())?;
+    let overview = vpn::read_overview_fresh(&settings);
+    let iface = overview.iface.clone().ok_or_else(|| {
+        softether_tray_lib::i18n::tr(
+            "没有找到虚拟网卡，请先连接 VPN",
+            "No virtual adapter found. Connect the VPN first.",
+        )
+        .to_string()
+    })?;
     if overview.iface_ipv4.is_none() {
-        return Err(format!("虚拟网卡 {iface} 还没有 IPv4 地址，请先连接 VPN"));
+        return Err(if softether_tray_lib::i18n::is_en() {
+            format!("Virtual adapter {iface} has no IPv4 address yet. Connect the VPN first.")
+        } else {
+            format!("虚拟网卡 {iface} 还没有 IPv4 地址，请先连接 VPN")
+        });
     }
 
     let subnets = settings.routes.subnets.clone();
     if subnets.is_empty() {
-        return Err("设置里没有配置任何网段，先添加要经 VPN 访问的内网网段".into());
+        return Err(softether_tray_lib::i18n::tr(
+            "设置里没有配置任何网段，先添加要经 VPN 访问的内网网段",
+            "No subnets are configured. Add the intranet subnets that should go through the VPN first.",
+        )
+        .into());
     }
 
     let nets_arg = subnets.join(",");
@@ -580,7 +833,13 @@ async fn verify_routes(app: AppHandle) -> Result<RouteReport, String> {
             move || settings::run_helper(&["probe", iface.as_str(), nets.as_str()])
         })
         .await
-        .map_err(|e| format!("验证任务失败: {e}"))??
+        .map_err(|e| {
+            if softether_tray_lib::i18n::is_en() {
+                format!("Route verification task failed: {e}")
+            } else {
+                format!("验证任务失败: {e}")
+            }
+        })??
     } else {
         // 没装 helper 时也能用，只是会弹一次密码框。
         // 输出格式必须与 helper 的 probe 完全一致，否则解析层要写两套。
@@ -609,33 +868,59 @@ async fn verify_routes(app: AppHandle) -> Result<RouteReport, String> {
             checks.push(RouteCheck {
                 subnet: rest.to_string(),
                 state: "ok".into(),
-                detail: "路由生效，流量经 VPN 转发".into(),
+                detail: softether_tray_lib::i18n::tr(
+                    "路由生效，流量经 VPN 转发",
+                    "Route is active; traffic is forwarded through the VPN",
+                )
+                .into(),
             });
         } else if let Some(rest) = line.strip_prefix("NOROUTE ") {
             checks.push(RouteCheck {
                 subnet: rest.to_string(),
                 state: "noRoute".into(),
-                detail: "流量没走 VPN，被物理网卡接走了".into(),
+                detail: softether_tray_lib::i18n::tr(
+                    "流量没走 VPN，被物理网卡接走了",
+                    "Traffic is not using the VPN and is leaving via the physical adapter",
+                )
+                .into(),
             });
         } else if let Some(rest) = line.strip_prefix("DEAD ") {
             checks.push(RouteCheck {
                 subnet: rest.to_string(),
                 state: "dead".into(),
-                detail: "路由在，但隧道那侧没有响应".into(),
+                detail: softether_tray_lib::i18n::tr(
+                    "路由在，但隧道那侧没有响应",
+                    "The route exists, but the tunnel side does not respond",
+                )
+                .into(),
             });
         }
     }
 
     if checks.is_empty() {
-        return Err(format!("没有拿到验证结果：{}", raw.trim()));
+        return Err(if softether_tray_lib::i18n::is_en() {
+            format!("No verification results were returned: {}", raw.trim())
+        } else {
+            format!("没有拿到验证结果：{}", raw.trim())
+        });
     }
 
     let ok = checks.iter().filter(|c| c.state == "ok").count();
     let bad = checks.len() - ok;
     let summary = if !tunnel_up {
-        "隧道不通：网关无响应，先检查连接状态".to_string()
+        softether_tray_lib::i18n::tr(
+            "隧道不通：网关无响应，先检查连接状态",
+            "Tunnel is down: the gateway does not respond; check the connection first",
+        )
+        .to_string()
     } else if bad == 0 {
-        format!("{ok} 个网段的路由全部生效")
+        if softether_tray_lib::i18n::is_en() {
+            format!("Routes for all {ok} subnets are active")
+        } else {
+            format!("{ok} 个网段的路由全部生效")
+        }
+    } else if softether_tray_lib::i18n::is_en() {
+        format!("{ok} subnet(s) OK, {bad} with problems")
     } else {
         format!("{ok} 个正常，{bad} 个有问题")
     };
@@ -648,9 +933,21 @@ fn set_autostart(app: AppHandle, enabled: bool) -> Result<bool, String> {
     use tauri_plugin_autostart::ManagerExt;
     let manager = app.autolaunch();
     if enabled {
-        manager.enable().map_err(|e| format!("开启开机自启动失败: {e}"))?;
+        manager.enable().map_err(|e| {
+            if softether_tray_lib::i18n::is_en() {
+                format!("Failed to enable launch at login: {e}")
+            } else {
+                format!("开启开机自启动失败: {e}")
+            }
+        })?;
     } else {
-        manager.disable().map_err(|e| format!("关闭开机自启动失败: {e}"))?;
+        manager.disable().map_err(|e| {
+            if softether_tray_lib::i18n::is_en() {
+                format!("Failed to disable launch at login: {e}")
+            } else {
+                format!("关闭开机自启动失败: {e}")
+            }
+        })?;
     }
     Ok(manager.is_enabled().unwrap_or(enabled))
 }
@@ -693,6 +990,7 @@ async fn quit_app(app: AppHandle) -> Result<(), String> {
 
 fn main() {
     let initial = Settings::load();
+    softether_tray_lib::i18n::set_locale(&initial.locale);
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
@@ -723,6 +1021,8 @@ fn main() {
             autostart_enabled,
             env_info,
             config_dir_path,
+            list_client_candidates,
+            validate_client_dir,
             open_softether_site,
             quit_app
         ])
@@ -750,9 +1050,20 @@ fn main() {
                         })
                     })
                     .await
-                    .unwrap_or_else(|_| Err("启动客户端任务失败".into()));
+                    .unwrap_or_else(|_| {
+                        Err(softether_tray_lib::i18n::tr(
+                            "启动客户端任务失败",
+                            "The client start task failed",
+                        )
+                        .to_string())
+                    });
                     if let Err(err) = started {
-                        notify(&handle, &Settings::default(), "客户端未启动", &err);
+                        notify(
+                            &handle,
+                            &Settings::default(),
+                            softether_tray_lib::i18n::tr("客户端未启动", "Client did not start"),
+                            &err,
+                        );
                     }
                     publish(&handle);
                 });

@@ -31,6 +31,8 @@
   "bundle": {
     "active": true,
     "targets": ["deb"],
+    "shortDescription": "SoftEther VPN 客户端托盘 GUI",
+    "longDescription": "SoftEther VPN 的 Linux 托盘客户端：账号管理、连接状态、虚拟网卡与路由配置。内置官方 vpnclient 与 vpncmd，无需另行安装 SoftEther 客户端；通过 polkit 授权后连接/断开不再弹密码框。",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -39,16 +41,16 @@
     ],
     "linux": {
       "deb": {
-        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0", "libayatana-appindicator3-1", "policykit-1 | pkexec"],
+        "depends": ["policykit-1 | pkexec"],
         "files": {
-          "../vendor/softether-client/vpnclient": "/usr/lib/softether-tray/client/vpnclient",
-          "../vendor/softether-client/vpncmd": "/usr/lib/softether-tray/client/vpncmd",
-          "../vendor/softether-client/hamcore.se2": "/usr/lib/softether-tray/client/hamcore.se2",
-          "../vendor/softether-client/lang.config": "/usr/lib/softether-tray/client/lang.config",
-          "../vendor/softether-client/ReadMeFirst_License.txt": "/usr/share/doc/soft-ether-tray/SoftEther-LICENSE.txt",
-          "../Tools/softether-tray-net": "/usr/libexec/softether-tray/softether-tray-net",
-          "../Tools/cn.softether.tray.net.policy": "/usr/share/polkit-1/actions/cn.softether.tray.net.policy",
-          "../Tools/50-softether-tray.rules": "/etc/polkit-1/rules.d/50-softether-tray.rules"
+          "/usr/lib/softether-tray/client/vpnclient": "../vendor/softether-client/vpnclient",
+          "/usr/lib/softether-tray/client/vpncmd": "../vendor/softether-client/vpncmd",
+          "/usr/lib/softether-tray/client/hamcore.se2": "../vendor/softether-client/hamcore.se2",
+          "/usr/lib/softether-tray/client/lang.config": "../vendor/softether-client/lang.config",
+          "/usr/share/doc/softether-tray/SoftEther-LICENSE.txt": "../vendor/softether-client/ReadMeFirst_License.txt",
+          "/usr/libexec/softether-tray/softether-tray-net": "../Tools/softether-tray-net",
+          "/usr/share/polkit-1/actions/cn.softether.tray.net.policy": "../Tools/cn.softether.tray.net.policy",
+          "/etc/polkit-1/rules.d/50-softether-tray.rules": "../Tools/50-softether-tray.rules"
         },
         "postInstallScript": "../Tools/deb-postinst.sh"
       }

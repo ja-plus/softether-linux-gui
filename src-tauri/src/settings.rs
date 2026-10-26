@@ -41,6 +41,14 @@ impl Default for RouteConfig {
 pub struct Settings {
     #[serde(default)]
     pub vpn_dir: Option<String>,
+    /// 客户端目录的来源："bundled" / "detected" / "custom"。
+    ///
+    /// 存字符串而不是枚举，是为了让配置文件被手改成无效值时能**降级**
+    /// 而不是让整个反序列化失败（那会让所有设置一起丢）。
+    /// 无效值在解析处按 None 处理 = 内置。
+    /// 为空表示老配置，行为等同 bundled。
+    #[serde(default)]
+    pub client_source: Option<String>,
     #[serde(default)]
     pub vpncmd_path: Option<String>,
     #[serde(default = "default_account")]
@@ -63,6 +71,9 @@ pub struct Settings {
     /// 保存时归一化；渲染侧同样只认这两种，未知值一律按 win11 处理。
     #[serde(default = "default_ui_style")]
     pub ui_style: String,
+    /// 界面语言："zh" 或 "en"。未知值一律按 zh 处理。
+    #[serde(default = "default_locale")]
+    pub locale: String,
 }
 
 fn default_account() -> Option<String> {
@@ -77,10 +88,48 @@ fn default_ui_style() -> String {
     "win11".into()
 }
 
+/// 老配置里没有 `locale` 字段时的兜底。
+///
+/// 升级前应用只有中文界面，所以不能把老用户的语言悄悄改掉；
+/// 只有真正首次安装（配置文件不存在）才走 `detect_system_locale()`。
+fn default_locale() -> String {
+    "zh".into()
+}
+
+/// 首次安装时按系统语言选择：仅中国大陆（zh_CN）用中文，其余地区一律英文。
+///
+/// 环境变量的优先级与 libc 一致：LC_ALL > LC_MESSAGES > LANG；
+/// `LANGUAGE` 是 gettext 的语言优先级列表，放在最后兜底。
+fn detect_system_locale() -> String {
+    for key in ["LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"] {
+        let Some(value) = std::env::var_os(key) else { continue };
+        let value = value.to_string_lossy();
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        return if is_mainland_china_locale(value) { "zh" } else { "en" }.to_string();
+    }
+    // 系统没有给出任何语言线索时按其他地区处理
+    "en".into()
+}
+
+/// 判断 locale 是否指向中国大陆。
+///
+/// 只认带 `cn` 地区的 zh 变体：`zh_CN.UTF-8`、`zh-Hans-CN` 命中，
+/// `zh_TW` / `zh_SG` 属于其他地区，按需求归到英文。
+fn is_mainland_china_locale(value: &str) -> bool {
+    let primary = value.to_ascii_lowercase().replace('-', "_");
+    let primary = primary.split(['.', '@', ':']).next().unwrap_or("");
+    let mut parts = primary.split('_');
+    parts.next() == Some("zh") && parts.any(|part| part == "cn")
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             vpn_dir: None,
+            client_source: None,
             vpncmd_path: None,
             active_account: default_account(),
             notifications: true,
@@ -90,6 +139,7 @@ impl Default for Settings {
             start_client_on_launch: false,
             stop_client_on_exit: false,
             ui_style: default_ui_style(),
+            locale: detect_system_locale(),
         }
     }
 }
@@ -125,23 +175,43 @@ impl Settings {
         };
         let mut loaded: Self = serde_json::from_str(&text).unwrap_or_default();
         loaded.normalize_ui_style();
+        loaded.normalize_locale();
         loaded
     }
 
     pub fn save(&self) -> Result<(), String> {
         let dir = config_dir();
-        fs::create_dir_all(&dir).map_err(|e| format!("无法创建配置目录 {}: {e}", dir.display()))?;
+        fs::create_dir_all(&dir).map_err(|e| {
+            if crate::i18n::is_en() {
+                format!("Cannot create config directory {}: {e}", dir.display())
+            } else {
+                format!("无法创建配置目录 {}: {e}", dir.display())
+            }
+        })?;
         let path = settings_path();
         let tmp = path.with_extension("json.tmp");
-        // 写回前顺手治愈手改坏的风格取值，避免垃圾值一直留在文件里
+        // 写回前顺手治愈手改坏的风格与语言取值，避免垃圾值一直留在文件里
         let mut normalized = self.clone();
         normalized.normalize_ui_style();
+        normalized.normalize_locale();
         let text = serde_json::to_string_pretty(&normalized).map_err(|e| e.to_string())?;
         {
-            let mut file = fs::File::create(&tmp).map_err(|e| format!("无法写入配置: {e}"))?;
+            let mut file = fs::File::create(&tmp).map_err(|e| {
+                crate::i18n::tr(
+                    &format!("无法写入配置: {e}"),
+                    &format!("Cannot write settings: {e}"),
+                )
+                .to_string()
+            })?;
             file.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
         }
-        fs::rename(&tmp, &path).map_err(|e| format!("无法替换配置: {e}"))
+        fs::rename(&tmp, &path).map_err(|e| {
+            crate::i18n::tr(
+                &format!("无法替换配置: {e}"),
+                &format!("Cannot replace settings: {e}"),
+            )
+            .to_string()
+        })
     }
 
     /// 把界面风格收敛到已知取值（win11 / deepin），手改坏的按 win11 处理。
@@ -150,19 +220,36 @@ impl Settings {
             self.ui_style = default_ui_style();
         }
     }
+
+    /// 把界面语言收敛到已知取值（zh / en），手改坏的按 zh 处理。
+    fn normalize_locale(&mut self) {
+        if self.locale != "en" {
+            self.locale = default_locale();
+        }
+    }
 }
 
 pub fn find_vpn_dir(settings: &Settings) -> Option<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(dir) = &settings.vpn_dir {
-        candidates.push(PathBuf::from(dir));
+    // 先按用户选的来源解析（内置 / 扫到的 / 自己指定）。
+    // 解析失败时**不再往下试别的目录**：静默换一个客户端会让用户
+    // 以为连的是自己装的那个，出问题根本查不出来。失败原因由
+    // 设置页通过 list_client_candidates 的 usable 字段呈现。
+    match crate::client_dir::resolve(
+        settings.client_source.as_deref().and_then(crate::client_dir::ClientSource::parse),
+        settings.vpn_dir.as_deref(),
+    ) {
+        Ok(resolved) => return Some(resolved.dir),
+        Err(_) => {}
     }
+    // 兜底：兼容手工编辑过配置、但没填 clientSource 的老用户
+    let mut candidates: Vec<PathBuf> = Vec::new();
     major_candidates(&mut candidates);
-    candidates.into_iter().find(|dir| dir.join("vpncmd").is_file())
+    let found = candidates.into_iter().find(|dir| dir.join("vpncmd").is_file());
+    found
 }
 
 /// deb 包内置的客户端目录。装了本应用就一定有，优先级最高。
-pub const BUNDLED_CLIENT_DIR: &str = "/usr/lib/softether-tray/client";
+pub use crate::client_dir::BUNDLED_CLIENT_DIR;
 
 fn major_candidates(into: &mut Vec<PathBuf>) {
     // 内置客户端排最前：它随包安装，版本确定、语言锁定为 cn，
@@ -224,12 +311,24 @@ pub struct VpncmdOutput {
 }
 
 pub fn vpncmd(settings: &Settings, auth: VpncmdAuth, args: &[&str]) -> Result<VpncmdOutput, String> {
-    let binary = vpncmd_path(settings).ok_or_else(|| "找不到 vpncmd，请在设置里指定 SoftEther VPN Client 目录".to_string())?;
+    let binary = vpncmd_path(settings).ok_or_else(|| {
+        crate::i18n::tr(
+            "找不到 vpncmd，请在设置里指定 SoftEther VPN Client 目录",
+            "Cannot find vpncmd. Set the SoftEther VPN Client directory in Settings.",
+        )
+        .to_string()
+    })?;
     let mut command = match auth {
         VpncmdAuth::Plain => Command::new(&binary),
         // pkexec 走图形密码框，避免 GUI 里出现没有 stdin 的 sudo 卡死。
         VpncmdAuth::Elevated => {
-            let pkexec = which("pkexec").ok_or_else(|| "系统缺少 pkexec，无法申请管理员权限".to_string())?;
+            let pkexec = which("pkexec").ok_or_else(|| {
+                crate::i18n::tr(
+                    "系统缺少 pkexec，无法申请管理员权限",
+                    "pkexec is missing; administrator privileges cannot be requested.",
+                )
+                .to_string()
+            })?;
             let mut cmd = Command::new(pkexec);
             cmd.arg(&binary);
             cmd
@@ -248,7 +347,13 @@ pub fn vpncmd(settings: &Settings, auth: VpncmdAuth, args: &[&str]) -> Result<Vp
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = command.output().map_err(|e| format!("执行 vpncmd 失败: {e}"))?;
+    let output = command.output().map_err(|e| {
+        crate::i18n::tr(
+            &format!("执行 vpncmd 失败: {e}"),
+            &format!("Failed to run vpncmd: {e}"),
+        )
+        .to_string()
+    })?;
     let mut text = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !stderr.trim().is_empty() {
@@ -259,18 +364,41 @@ pub fn vpncmd(settings: &Settings, auth: VpncmdAuth, args: &[&str]) -> Result<Vp
 }
 
 pub fn validate_subnet(value: &str) -> Result<(), String> {
-    let (addr, prefix) = value.split_once('/').ok_or_else(|| format!("网段 {value} 缺少前缀长度"))?;
-    let prefix: u8 = prefix.parse().map_err(|_| format!("网段 {value} 前缀不是数字"))?;
+    let (addr, prefix) = value.split_once('/').ok_or_else(|| {
+        if crate::i18n::is_en() {
+            format!("Subnet {value} is missing a prefix length")
+        } else {
+            format!("网段 {value} 缺少前缀长度")
+        }
+    })?;
+    let prefix: u8 = prefix.parse().map_err(|_| {
+        if crate::i18n::is_en() {
+            format!("Subnet {value} has a non-numeric prefix")
+        } else {
+            format!("网段 {value} 前缀不是数字")
+        }
+    })?;
     if prefix > 32 {
-        return Err(format!("网段 {value} 前缀超过 32"));
+        return Err(if crate::i18n::is_en() {
+            format!("Subnet {value} prefix exceeds 32")
+        } else {
+            format!("网段 {value} 前缀超过 32")
+        });
     }
+    let invalid = || {
+        if crate::i18n::is_en() {
+            format!("Subnet {value} is not a valid IPv4 network")
+        } else {
+            format!("网段 {value} 不是合法 IPv4")
+        }
+    };
     let mut octets = 0;
     for part in addr.split('.') {
-        part.parse::<u8>().map_err(|_| format!("网段 {value} 不是合法 IPv4"))?;
+        part.parse::<u8>().map_err(|_| invalid())?;
         octets += 1;
     }
     if octets != 4 {
-        return Err(format!("网段 {value} 不是合法 IPv4"));
+        return Err(invalid());
     }
     Ok(())
 }
@@ -278,13 +406,21 @@ pub fn validate_subnet(value: &str) -> Result<(), String> {
 pub fn validate_target(value: &str) -> Result<(), String> {
     let value = value.trim();
     if value.is_empty() {
-        return Err("诊断目标不能为空".into());
+        return Err(crate::i18n::tr(
+            "诊断目标不能为空",
+            "Diagnostic target cannot be empty.",
+        )
+        .into());
     }
     if value.len() > 253 || value.starts_with('-') {
-        return Err("诊断目标不合法".into());
+        return Err(crate::i18n::tr("诊断目标不合法", "Diagnostic target is invalid.").into());
     }
     if !value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':')) {
-        return Err("诊断目标只能包含字母、数字、点、连字符和冒号".into());
+        return Err(crate::i18n::tr(
+            "诊断目标只能包含字母、数字、点、连字符和冒号",
+            "Diagnostic target may contain only letters, digits, dots, hyphens and colons.",
+        )
+        .into());
     }
     Ok(())
 }
@@ -293,25 +429,40 @@ pub fn validate_mtu(mtu: u16) -> Result<(), String> {
     if (576..=1500).contains(&mtu) {
         Ok(())
     } else {
-        Err("MTU 必须介于 576 和 1500 之间".into())
+        Err(crate::i18n::tr(
+            "MTU 必须介于 576 和 1500 之间",
+            "MTU must be between 576 and 1500.",
+        )
+        .into())
     }
 }
 
 pub fn run_privileged(script: &str) -> Result<String, String> {
-    let pkexec = which("pkexec").ok_or_else(|| "系统缺少 pkexec".to_string())?;
+    let pkexec = which("pkexec")
+        .ok_or_else(|| crate::i18n::tr("系统缺少 pkexec", "pkexec is missing.").to_string())?;
     let output = Command::new(pkexec)
         .arg("sh")
         .arg("-c")
         .arg(script)
         .stdin(Stdio::null())
         .output()
-        .map_err(|e| format!("执行提权命令失败: {e}"))?;
+        .map_err(|e| {
+            crate::i18n::tr(
+                &format!("执行提权命令失败: {e}"),
+                &format!("Failed to run privileged command: {e}"),
+            )
+            .to_string()
+        })?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        Err(format!("提权操作失败（可能是取消了密码框）: {}{}", stdout.trim(), stderr.trim()))
+        if crate::i18n::is_en() {
+            Err(format!("Privileged operation failed (the password prompt may have been cancelled): {}{}", stdout.trim(), stderr.trim()))
+        } else {
+            Err(format!("提权操作失败（可能是取消了密码框）: {}{}", stdout.trim(), stderr.trim()))
+        }
     }
 }
 
@@ -339,9 +490,15 @@ pub fn run_helper(args: &[&str]) -> Result<String, String> {
 ///
 /// 退出应用时要用短的超时：那会儿的用户意图是"关掉窗口"，不该被密码框卡住。
 pub fn run_helper_with_timeout(args: &[&str], wait_seconds: Option<u64>) -> Result<String, String> {
-    let helper = privileged_helper()
-        .ok_or_else(|| "特权助手未安装（sudo bash Tools/install-polkit.sh）".to_string())?;
-    let pkexec = which("pkexec").ok_or_else(|| "系统缺少 pkexec".to_string())?;
+    let helper = privileged_helper().ok_or_else(|| {
+        crate::i18n::tr(
+            "特权助手未安装（sudo bash Tools/install-polkit.sh）",
+            "The privileged helper is not installed (sudo bash Tools/install-polkit.sh).",
+        )
+        .to_string()
+    })?;
+    let pkexec = which("pkexec")
+        .ok_or_else(|| crate::i18n::tr("系统缺少 pkexec", "pkexec is missing.").to_string())?;
     let mut child = Command::new(pkexec)
         .arg(&helper)
         .args(args)
@@ -349,7 +506,13 @@ pub fn run_helper_with_timeout(args: &[&str], wait_seconds: Option<u64>) -> Resu
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("执行特权助手失败: {e}"))?;
+        .map_err(|e| {
+            crate::i18n::tr(
+                &format!("执行特权助手失败: {e}"),
+                &format!("Failed to run the privileged helper: {e}"),
+            )
+            .to_string()
+        })?;
 
     if let Some(seconds) = wait_seconds {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
@@ -357,12 +520,22 @@ pub fn run_helper_with_timeout(args: &[&str], wait_seconds: Option<u64>) -> Resu
             match child.try_wait() {
                 Ok(Some(_)) => break,
                 Ok(None) => {}
-                Err(e) => return Err(format!("执行特权助手失败: {e}")),
+                Err(e) => {
+                    return Err(crate::i18n::tr(
+                        &format!("执行特权助手失败: {e}"),
+                        &format!("Failed to run the privileged helper: {e}"),
+                    )
+                    .to_string())
+                }
             }
             if std::time::Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("等待授权超时".into());
+                return Err(crate::i18n::tr(
+                    "等待授权超时",
+                    "Timed out waiting for authorization.",
+                )
+                .into());
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
@@ -370,7 +543,13 @@ pub fn run_helper_with_timeout(args: &[&str], wait_seconds: Option<u64>) -> Resu
 
     let output = child
         .wait_with_output()
-        .map_err(|e| format!("执行特权助手失败: {e}"))?;
+        .map_err(|e| {
+            crate::i18n::tr(
+                &format!("执行特权助手失败: {e}"),
+                &format!("Failed to run the privileged helper: {e}"),
+            )
+            .to_string()
+        })?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).to_string());
     }
@@ -378,11 +557,15 @@ pub fn run_helper_with_timeout(args: &[&str], wait_seconds: Option<u64>) -> Resu
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let detail = format!("{}{}", stdout.trim(), stderr.trim());
-    Err(match code {
-        Some(3) => format!("无法确定虚拟网卡的隧道网关，路由未下发（{detail}）"),
-        Some(4) => format!("系统没有 dhclient/dhcpcd，网卡拿不到地址（{detail}）"),
-        Some(126) | Some(127) => format!("已取消授权（{detail}）"),
-        _ => format!("特权操作失败: {}", if detail.is_empty() { "未知原因".into() } else { detail }),
+    Err(match (code, crate::i18n::is_en()) {
+        (Some(3), false) => format!("无法确定虚拟网卡的隧道网关，路由未下发（{detail}）"),
+        (Some(3), true) => format!("Cannot determine the tunnel gateway; routes were not installed ({detail})"),
+        (Some(4), false) => format!("系统没有 dhclient/dhcpcd，网卡拿不到地址（{detail}）"),
+        (Some(4), true) => format!("No dhclient/dhcpcd is available, so the interface cannot get an address ({detail})"),
+        (Some(126) | Some(127), false) => format!("已取消授权（{detail}）"),
+        (Some(126) | Some(127), true) => format!("Authorization cancelled ({detail})"),
+        (_, false) => format!("特权操作失败: {}", if detail.is_empty() { "未知原因".into() } else { detail }),
+        (_, true) => format!("Privileged operation failed: {}", if detail.is_empty() { "unknown reason".into() } else { detail }),
     })
 }
 
@@ -432,7 +615,11 @@ pub fn connect_routes_script(
 ) -> Result<String, String> {
     validate_mtu(cfg.mtu)?;
     if iface.is_empty() || !iface.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-        return Err(format!("网卡名不合法: {iface}"));
+        return Err(crate::i18n::tr(
+            &format!("网卡名不合法: {iface}"),
+            &format!("Invalid interface name: {iface}"),
+        )
+        .to_string());
     }
     for net in &cfg.subnets {
         validate_subnet(net)?;
@@ -474,7 +661,11 @@ pub fn connect_routes_script(
 /// 是因为有人会把静态地址配在网卡上，那些不该被应用清掉。
 pub fn disconnect_routes_script(iface: &str, subnets: &[String], flush_addr: bool) -> Result<String, String> {
     if iface.is_empty() || !iface.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-        return Err(format!("网卡名不合法: {iface}"));
+        return Err(crate::i18n::tr(
+            &format!("网卡名不合法: {iface}"),
+            &format!("Invalid interface name: {iface}"),
+        )
+        .to_string());
     }
     let mut lines = vec!["set -e".to_string()];
     for net in subnets {
@@ -677,10 +868,35 @@ mod tests {
         assert!(loaded.notifications);
         assert_eq!(loaded.routes.mtu, 1400);
         assert_eq!(loaded.ui_style, "win11");
-        // 老配置文件里没有 uiStyle 字段，缺省也只能是 win11
+        // locale 首次安装时按系统语言探测，测试环境不假定具体取值，只要求往返一致
+        assert_eq!(loaded.locale, settings.locale);
+        // 老配置文件里没有 uiStyle / locale 字段，缺省是 win11 / zh
         let legacy: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(legacy.routes.subnets.len(), 3);
         assert_eq!(legacy.ui_style, "win11");
+        assert_eq!(legacy.locale, "zh");
+    }
+
+    #[test]
+    fn mainland_china_locales_select_chinese() {
+        for value in ["zh_CN.UTF-8", "zh-CN", "zh_Hans_CN", "zh_CN@variant", "zh_CN:zh"] {
+            assert!(is_mainland_china_locale(value), "{value} 应判为中国大陆");
+        }
+    }
+
+    #[test]
+    fn other_regions_select_english() {
+        for value in [
+            "en_US.UTF-8",
+            "C",
+            "zh_TW.UTF-8",
+            "zh-HK",
+            "zh_SG",
+            "ja_JP.UTF-8",
+            "",
+        ] {
+            assert!(!is_mainland_china_locale(value), "{value} 不应判为中国大陆");
+        }
     }
 
     #[test]
@@ -693,5 +909,17 @@ mod tests {
         settings.ui_style = "win95".into();
         settings.normalize_ui_style();
         assert_eq!(settings.ui_style, "win11");
+    }
+
+    #[test]
+    fn locale_normalizes_to_known_values() {
+        let mut settings = Settings::default();
+        settings.locale = "en".into();
+        settings.normalize_locale();
+        assert_eq!(settings.locale, "en");
+        // 手改坏的取值收敛成 zh
+        settings.locale = "fr".into();
+        settings.normalize_locale();
+        assert_eq!(settings.locale, "zh");
     }
 }

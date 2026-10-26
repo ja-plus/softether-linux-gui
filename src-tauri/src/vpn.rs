@@ -20,6 +20,14 @@ pub struct Overview {
     pub vpn_dir: Option<String>,
     pub routes: Vec<String>,
     pub route_warnings: Vec<String>,
+    /// 虚拟网卡的累计收发字节（直接读 sysfs）。
+    ///
+    /// 界面上的实时速率必须用它，不能用 `snapshot.rx_bytes`——后者来自
+    /// `AccountStatusGet`，每读一次要冷启动一个 vpncmd 进程（实测 250ms、
+    /// 启动瞬间吃满一个核），2 秒一轮的速率刷新根本付不起这个代价。
+    /// 会话层的累计量仍走 vpncmd，低频更新即可。
+    pub link_rx_bytes: u64,
+    pub link_tx_bytes: u64,
 }
 
 /// `vpnclient` 进程探测结果的短缓存。
@@ -69,6 +77,119 @@ pub fn invalidate_service_cache() {
     }
 }
 
+/// `AccountList` + `NicList` 的结果缓存。
+///
+/// 这两份清单只在用户增删账号、改配置时变化，却原来跟着 2 秒的轮询每轮各
+/// 冷启动一次 vpncmd（实测 250 / 275 ms，启动瞬间吃满一个核）。缓存之后
+/// 稳态轮询不再为此付出任何进程开销——这正是"界面每两秒顿一下"的来源。
+static INVENTORY: Mutex<Option<InventoryCache>> = Mutex::new(None);
+const INVENTORY_TTL: Duration = Duration::from_secs(30);
+
+struct InventoryCache {
+    at: Instant,
+    accounts: Vec<AccountSummary>,
+    nics: Vec<NicInfo>,
+}
+
+/// `AccountStatusGet` 的结果缓存。
+///
+/// 连接状态的变化远慢于 2 秒，而且所有会改变它的动作（连接、断开、启停服务）
+/// 都走 `read_overview_fresh`，缓存会被一并重建，不存在读到旧状态的窗口。
+static STATUS: Mutex<Option<StatusCache>> = Mutex::new(None);
+const STATUS_TTL: Duration = Duration::from_secs(3);
+
+struct StatusCache {
+    at: Instant,
+    name: String,
+    /// `None` 表示这个账号当前未连接；未连接也要缓存，否则每轮都会白 fork 一次
+    snapshot: Option<SessionSnapshot>,
+}
+
+/// 把两层缓存清空。操作路径（连接/断开/启停）读状态前必须调用。
+pub fn clear_overview_cache() {
+    if let Ok(mut cache) = INVENTORY.lock() {
+        *cache = None;
+    }
+    if let Ok(mut cache) = STATUS.lock() {
+        *cache = None;
+    }
+}
+
+fn cached_inventory(now: Instant) -> Option<(Vec<AccountSummary>, Vec<NicInfo>)> {
+    let cache = INVENTORY.lock().ok()?;
+    let entry = cache.as_ref()?;
+    (now.duration_since(entry.at) < INVENTORY_TTL)
+        .then(|| (entry.accounts.clone(), entry.nics.clone()))
+}
+
+fn store_inventory(at: Instant, accounts: Vec<AccountSummary>, nics: Vec<NicInfo>) {
+    if let Ok(mut cache) = INVENTORY.lock() {
+        *cache = Some(InventoryCache { at, accounts, nics });
+    }
+}
+
+/// 读账户与网卡清单。任一路读失败都不写缓存——客户端可能正在重启，
+/// 把一份空清单钉住 30 秒会让界面以为账号都丢了。
+fn read_inventory(settings: &Settings, now: Instant) -> (Vec<AccountSummary>, Vec<NicInfo>) {
+    if let Some(hit) = cached_inventory(now) {
+        return hit;
+    }
+    let mut accounts = Vec::new();
+    let mut nics = Vec::new();
+    let mut complete = true;
+
+    match settings::vpncmd(settings, settings::VpncmdAuth::Plain, &["AccountList"]) {
+        Ok(output) if crate::softether::text_says_success(&output.stdout) => {
+            accounts = softether::parse_account_list(&output.stdout);
+        }
+        _ => complete = false,
+    }
+    match settings::vpncmd(settings, settings::VpncmdAuth::Plain, &["NicList"]) {
+        Ok(output) if crate::softether::text_says_success(&output.stdout) => {
+            nics = softether::parse_nic_list(&output.stdout);
+        }
+        _ => complete = false,
+    }
+    if complete {
+        store_inventory(now, accounts.clone(), nics.clone());
+    }
+    (accounts, nics)
+}
+
+fn cached_status(now: Instant, name: &str) -> Option<Option<SessionSnapshot>> {
+    let cache = STATUS.lock().ok()?;
+    let entry = cache.as_ref()?;
+    if entry.name == name && now.duration_since(entry.at) < STATUS_TTL {
+        return Some(entry.snapshot.clone());
+    }
+    None
+}
+
+fn read_status(settings: &Settings, name: &str, now: Instant) -> Option<SessionSnapshot> {
+    if let Some(hit) = cached_status(now, name) {
+        return hit;
+    }
+    let output = settings::vpncmd(settings, settings::VpncmdAuth::Plain, &["AccountStatusGet", name]).ok()?;
+    let parsed = softether::parse_account_status(&output.stdout);
+    let snapshot = parsed.connected.then_some(parsed);
+    if let Ok(mut cache) = STATUS.lock() {
+        *cache = Some(StatusCache { at: now, name: name.to_string(), snapshot: snapshot.clone() });
+    }
+    snapshot
+}
+
+/// 网卡累计收发字节，读 sysfs 是一次文件读，不 fork 任何进程。
+fn link_counters(iface: &str) -> Option<(u64, u64)> {
+    let read = |field: &str| -> Option<u64> {
+        std::fs::read_to_string(format!("/sys/class/net/{iface}/statistics/{field}"))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    };
+    Some((read("rx_bytes")?, read("tx_bytes")?))
+}
+
 pub fn detect_iface() -> Option<String> {
     let mut entries: Vec<String> = std::fs::read_dir("/sys/class/net")
         .ok()?
@@ -80,45 +201,57 @@ pub fn detect_iface() -> Option<String> {
     entries.into_iter().next()
 }
 
+/// 读一份状态，走缓存。高频轮询（前端 2 秒一轮）专用。
 pub fn read_overview(settings: &Settings) -> Overview {
+    build_overview(settings, false)
+}
+
+/// 读一份状态，忽略缓存。连接/断开/启停这类操作之后必须用这个，
+/// 否则会把动作之前的状态当成结果回填给界面。
+pub fn read_overview_fresh(settings: &Settings) -> Overview {
+    build_overview(settings, true)
+}
+
+fn build_overview(settings: &Settings, fresh: bool) -> Overview {
+    if fresh {
+        clear_overview_cache();
+    }
+    let now = Instant::now();
     // 轮询路径用缓存版探测：每 2 秒 fork 一次 pgrep 没必要
     let running = service_running_cached();
     let iface = detect_iface();
-    let mut accounts = Vec::new();
-    let mut nics = Vec::new();
-    let mut snapshot = None;
     let vpncmd_ready = settings::vpncmd_path(settings).is_some();
-
-    if vpncmd_ready && running {
-        if let Ok(output) = settings::vpncmd(settings, settings::VpncmdAuth::Plain, &["AccountList"]) {
-            if crate::softether::text_says_success(&output.stdout) {
-                accounts = softether::parse_account_list(&output.stdout);
-            }
-        }
-        if let Ok(output) = settings::vpncmd(settings, settings::VpncmdAuth::Plain, &["NicList"]) {
-            if crate::softether::text_says_success(&output.stdout) {
-                nics = softether::parse_nic_list(&output.stdout);
-            }
-        }
-        let target = active_account(settings, &accounts);
-        if let Some(name) = target {
-            if let Ok(output) = settings::vpncmd(settings, settings::VpncmdAuth::Plain, &["AccountStatusGet", &name]) {
-                let parsed = softether::parse_account_status(&output.stdout);
-                if parsed.connected {
-                    snapshot = Some(parsed);
-                }
-            }
-        }
-    }
+    let (accounts, nics, snapshot) = if vpncmd_ready && running {
+        let (accounts, nics) = read_inventory(settings, now);
+        let snapshot = active_account(settings, &accounts)
+            .and_then(|name| read_status(settings, &name, now));
+        (accounts, nics, snapshot)
+    } else {
+        // 客户端没跑：清缓存，下次启动绝不能拿停机前的清单
+        clear_overview_cache();
+        (Vec::new(), Vec::new(), None)
+    };
 
     let routes = iface.as_deref().map(settings::routes_on).unwrap_or_default();
+    let (link_rx_bytes, link_tx_bytes) = iface.as_deref().and_then(link_counters).unwrap_or((0, 0));
     let mut route_warnings = Vec::new();
     if snapshot.is_none() && !routes.is_empty() {
-        route_warnings.push(format!(
-            "{} 上仍有 {} 条网段路由，但隧道未连接，内网可能被黑洞",
-            iface.clone().unwrap_or_else(|| "虚拟网卡".into()),
-            routes.len()
-        ));
+        let iface_name = iface.clone().unwrap_or_else(|| {
+            crate::i18n::tr("虚拟网卡", "virtual adapter").to_string()
+        });
+        route_warnings.push(if crate::i18n::is_en() {
+            format!(
+                "{} still has {} subnet route(s) while the tunnel is down; intranet traffic may be black-holed",
+                iface_name,
+                routes.len()
+            )
+        } else {
+            format!(
+                "{} 上仍有 {} 条网段路由，但隧道未连接，内网可能被黑洞",
+                iface_name,
+                routes.len()
+            )
+        });
     }
 
     Overview {
@@ -133,6 +266,8 @@ pub fn read_overview(settings: &Settings) -> Overview {
         vpn_dir: settings::find_vpn_dir(settings).map(|p| settings::path_display(&p)),
         routes,
         route_warnings,
+        link_rx_bytes,
+        link_tx_bytes,
     }
 }
 
@@ -163,7 +298,13 @@ pub fn last_error(output: &str) -> String {
         .rev()
         .find(|line| line.contains("错误") || line.contains("失败") || line.contains("Error"))
         .map(|line| line.trim().to_string());
-    line.unwrap_or_else(|| "命令没有成功完成".to_string())
+    line.unwrap_or_else(|| {
+        crate::i18n::tr(
+            "命令没有成功完成",
+            "The command did not complete successfully.",
+        )
+        .to_string()
+    })
 }
 
 pub fn account_status(settings: &Settings, name: &str) -> Option<SessionSnapshot> {
@@ -224,10 +365,17 @@ pub(crate) fn run_root(
 /// 把 pkexec / sudo 的退出码翻译成人能看懂的失败原因。
 ///
 /// 126 = 用户取消了授权框（或没有授权代理），127 = 找不到命令。
-fn explain_failure(action: &str, status: Option<i32>) -> String {
-    match status {
-        Some(126) | Some(127) => format!("已取消授权，未{action}客户端"),
-        _ => format!("{action}客户端失败"),
+fn explain_failure(action_zh: &str, action_en: &str, status: Option<i32>) -> String {
+    if crate::i18n::is_en() {
+        match status {
+            Some(126) | Some(127) => format!("Authorization cancelled; client was not {action_en}"),
+            _ => format!("Failed to {action_en} the client"),
+        }
+    } else {
+        match status {
+            Some(126) | Some(127) => format!("已取消授权，未{action_zh}客户端"),
+            _ => format!("{action_zh}客户端失败"),
+        }
     }
 }
 
@@ -252,18 +400,33 @@ fn start_service_inner(settings: &Settings) -> Result<bool, String> {
         let binary = binary.to_string_lossy().to_string();
         // 装了 polkit 助手就静默启动；否则退回 pkexec / sudo 弹框
         if settings::privileged_helper().is_some() {
-            settings::run_helper(&["vpnclient", "start", &binary])
-                .map_err(|e| format!("启动 VPN 服务失败: {e}"))?;
+            settings::run_helper(&["vpnclient", "start", &binary]).map_err(|e| {
+                if crate::i18n::is_en() {
+                    format!("Failed to start the VPN service: {e}")
+                } else {
+                    format!("启动 VPN 服务失败: {e}")
+                }
+            })?;
             if service_running() {
                 return Ok(true);
             }
-            return Err("启动客户端后仍未见进程，请检查 vpnclient 日志".into());
+            return Err(crate::i18n::tr(
+                "启动客户端后仍未见进程，请检查 vpnclient 日志",
+                "The client process still is not running; check the vpnclient log.",
+            )
+            .into());
         }
-        let output = run_root(&binary, "start", None).map_err(|e| format!("启动 VPN 服务失败: {e}"))?;
+        let output = run_root(&binary, "start", None).map_err(|e| {
+            if crate::i18n::is_en() {
+                format!("Failed to start the VPN service: {e}")
+            } else {
+                format!("启动 VPN 服务失败: {e}")
+            }
+        })?;
         if service_running() {
             return Ok(true);
         }
-        return Err(explain_failure("启动", output.and_then(|o| o.status.code())));
+        return Err(explain_failure("启动", "start", output.and_then(|o| o.status.code())));
     }
     if which("systemctl").is_some() {
         let _ = Command::new("pkexec").args(["systemctl", "start", "vpnclient"]).status();
@@ -271,7 +434,11 @@ fn start_service_inner(settings: &Settings) -> Result<bool, String> {
             return Ok(true);
         }
     }
-    Err("找不到 vpnclient，且系统服务未能启动。请在设置里指定 SoftEther VPN Client 目录".into())
+    Err(crate::i18n::tr(
+        "找不到 vpnclient，且系统服务未能启动。请在设置里指定 SoftEther VPN Client 目录",
+        "Cannot find vpnclient and the system service did not start. Set the SoftEther VPN Client directory in Settings.",
+    )
+    .into())
 }
 
 /// 停止 SoftEther 客户端服务。
@@ -296,21 +463,40 @@ fn stop_service_inner(settings: &Settings, wait_seconds: Option<u64>) -> Result<
         let binary = binary.to_string_lossy().to_string();
         if settings::privileged_helper().is_some() {
             settings::run_helper_with_timeout(&["vpnclient", "stop", &binary], wait_seconds)
-                .map_err(|e| format!("停止 VPN 服务失败: {e}"))?;
+                .map_err(|e| {
+                    if crate::i18n::is_en() {
+                        format!("Failed to stop the VPN service: {e}")
+                    } else {
+                        format!("停止 VPN 服务失败: {e}")
+                    }
+                })?;
             if !service_running() {
                 return Ok(());
             }
-            return Err("停止客户端后进程仍在运行".into());
+            return Err(crate::i18n::tr(
+                "停止客户端后进程仍在运行",
+                "The client process is still running after stopping.",
+            )
+            .into());
         }
-        let output = run_root(&binary, "stop", wait_seconds)
-            .map_err(|e| format!("停止 VPN 服务失败: {e}"))?;
+        let output = run_root(&binary, "stop", wait_seconds).map_err(|e| {
+            if crate::i18n::is_en() {
+                format!("Failed to stop the VPN service: {e}")
+            } else {
+                format!("停止 VPN 服务失败: {e}")
+            }
+        })?;
         if !service_running() {
             return Ok(());
         }
         if output.is_none() {
-            return Err("等待授权超时，客户端未停止".into());
+            return Err(crate::i18n::tr(
+                "等待授权超时，客户端未停止",
+                "Timed out waiting for authorization; the client was not stopped.",
+            )
+            .into());
         }
-        return Err(explain_failure("停止", output.and_then(|o| o.status.code())));
+        return Err(explain_failure("停止", "stop", output.and_then(|o| o.status.code())));
     }
     if which("systemctl").is_some() {
         let _ = Command::new("pkexec").args(["systemctl", "stop", "vpnclient"]).status();
@@ -318,7 +504,11 @@ fn stop_service_inner(settings: &Settings, wait_seconds: Option<u64>) -> Result<
             return Ok(());
         }
     }
-    Err("停止 VPN 服务失败，客户端进程仍在运行".into())
+    Err(crate::i18n::tr(
+        "停止 VPN 服务失败，客户端进程仍在运行",
+        "Failed to stop the VPN service; the client process is still running.",
+    )
+    .into())
 }
 
 /// 客户端进程是否由本应用拉起（用于决定退出时该不该停它）
@@ -348,5 +538,40 @@ mod tests {
         assert!(SERVICE_CACHE.lock().unwrap().is_some(), "缓存版探测应当写入缓存");
         invalidate_service_cache();
         assert!(SERVICE_CACHE.lock().unwrap().is_none(), "失效后下一次读取必须重新探测");
+    }
+
+    /// 速率数据源必须能直接读，不能退化到"读不到就显示 0"。
+    #[test]
+    fn link_counters_reads_sysfs() {
+        let (rx, tx) = link_counters("lo").expect("lo 的计数器必须可读");
+        // lo 上跑过任何测试流量都不该让这两项变成 0 以外的怪值；这里只验路径拼接正确
+        assert!(rx > 0 || tx > 0, "lo 计数器应当有累计值（本机任何网络活动都会计入）");
+        assert!(link_counters("softether-no-such-iface").is_none(), "不存在的网卡必须返回 None");
+    }
+
+    /// 缓存命中时必须完全不碰 vpncmd（否则等于没优化）。
+    #[test]
+    fn overview_cache_short_circuits_refresh() {
+        let settings = Settings::default();
+        if !service_running_cached() {
+            // 客户端没跑：这条路径本来就不读 vpncmd，跳过环境相关的断言
+            return;
+        }
+        clear_overview_cache();
+        store_inventory(
+            Instant::now(),
+            vec![AccountSummary {
+                name: "cached-account".into(),
+                status: "已连接".into(),
+                host: "example.invalid".into(),
+                port: Some(443),
+                hub: "VPN".into(),
+                nic: "VPN".into(),
+            }],
+            Vec::new(),
+        );
+        let (accounts, _) = read_inventory(&settings, Instant::now());
+        assert_eq!(accounts.len(), 1, "命中缓存必须直接返回缓存内容，不再启动 vpncmd");
+        clear_overview_cache();
     }
 }

@@ -11,6 +11,10 @@ import {
   formatBytes,
   formatDuration,
   formatRate,
+  isAccountConnected,
+  isYes,
+  localizeFlag,
+  localizeStatus,
   overview,
   refresh,
   run,
@@ -20,6 +24,7 @@ import {
   stopService,
   toast,
 } from '../lib/api'
+import { t, locale } from '../lib/i18n'
 
 interface RateSample {
   rx: number
@@ -55,14 +60,20 @@ const selected = computed(() => {
   return accounts.value.find((account) => account.name === snapshot.value?.name) ?? null
 })
 
-/** 账户是否处于已连接状态：status 可能缺失，不能直接调 .includes（会整页白屏） */
+/** 账户是否处于已连接状态：中英文输出都认，且 status 可能缺失 */
 function isConnected(account: { status?: string | null }): boolean {
-  return (account.status ?? '').includes('已连接')
+  return isAccountConnected(account.status)
+}
+
+/** 后端返回多条路由告警，分隔符也要跟随语言 */
+function joinWarnings(list: string[]): string {
+  return list.join(locale.value === 'en' ? '; ' : '；')
 }
 
 function recordRate() {
-  const current = snapshot.value
-  if (!current) {
+  const current = overview.value
+  // 未连接时把曲线清空；连接状态本身由 snapshot 决定，速率取网卡计数器
+  if (!current?.snapshot) {
     rates.value = []
     previous = null
     return
@@ -71,12 +82,13 @@ function recordRate() {
   if (previous) {
     const deltaSeconds = (at - previous.at) / 1000
     if (deltaSeconds > 0.2) {
-      const rx = Math.max(0, (current.rxBytes - previous.rx) / deltaSeconds)
-      const tx = Math.max(0, (current.txBytes - previous.tx) / deltaSeconds)
+      // 网卡重建（重连）时计数器会归零，Math.max 兜住这种负增量
+      const rx = Math.max(0, (current.linkRxBytes - previous.rx) / deltaSeconds)
+      const tx = Math.max(0, (current.linkTxBytes - previous.tx) / deltaSeconds)
       rates.value = [...rates.value, { rx, tx }].slice(-40)
     }
   }
-  previous = { at, rx: current.rxBytes, tx: current.txBytes }
+  previous = { at, rx: current.linkRxBytes, tx: current.linkTxBytes }
 }
 
 async function tick() {
@@ -115,22 +127,48 @@ async function confirmDelete(name: string) {
 async function doDelete(name: string) {
   const ok = await run(`delete:${name}`, () => invoke('delete_account', { name }))
   deleting.value = null
-  if (ok !== null) showToast(`已删除配置 ${name}`)
+  if (ok !== null) showToast(t('overview.deleted', { name }))
 }
 
 async function revealConfig() {
-  showToast(`设置目录：${await invoke<string>('config_dir_path')}`)
+  showToast(t('overview.configDir', { path: await invoke<string>('config_dir_path') }))
+}
+
+/**
+ * 轮询节奏。
+ *
+ * 窗口可见时 2 秒一次（速率曲线要有肉），窗口收起/最小化时 10 秒一次：
+ * 那会儿没人看曲线，但托盘状态还得跟得上。原来不分前后台一律 2 秒，
+ * 常驻托盘时也在白白唤醒后端。
+ */
+const POLL_VISIBLE_MS = 2000
+const POLL_HIDDEN_MS = 10000
+
+function schedulePoll() {
+  window.clearInterval(pollTimer)
+  pollTimer = window.setInterval(tick, document.hidden ? POLL_HIDDEN_MS : POLL_VISIBLE_MS)
+}
+
+function onVisibilityChange() {
+  schedulePoll()
+  // 切回前台立刻补一次，别让用户对着 10 秒前的数据发呆
+  if (!document.hidden) tick()
 }
 
 onMounted(() => {
-  pollTimer = window.setInterval(tick, 2000)
-  clockTimer = window.setInterval(() => (now.value = Date.now()), 1000)
+  schedulePoll()
+  // 连接时长只在已连接时有意义，未连接时不必每秒改动一次 DOM
+  clockTimer = window.setInterval(() => {
+    if (snapshot.value) now.value = Date.now()
+  }, 1000)
+  document.addEventListener('visibilitychange', onVisibilityChange)
   tick()
 })
 
 onBeforeUnmount(() => {
   window.clearInterval(pollTimer)
   window.clearInterval(clockTimer)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 
 watch(
@@ -146,34 +184,34 @@ watch(
   <section class="overview">
     <header class="head">
       <div>
-        <h1>连接</h1>
+        <h1>{{ t('overview.title') }}</h1>
         <p class="hint">
-          当前状态来自 SoftEther 客户端服务本身，每 2 秒刷新一次；关闭窗口后仍在托盘驻留。
+          {{ t('overview.subtitle') }}
         </p>
       </div>
       <div class="row">
         <button class="ghost" :disabled="refreshing" @click="manualRefresh">
-          <RefreshCw :size="14" :class="{ spin: refreshing }" /> 刷新
+          <RefreshCw :size="14" :class="{ spin: refreshing }" /> {{ t('overview.refresh') }}
         </button>
         <button class="primary" :disabled="!!busy" @click="creating = true">
-          <Plus :size="14" /> 新建配置
+          <Plus :size="14" /> {{ t('overview.newAccount') }}
         </button>
       </div>
     </header>
 
     <div v-if="errorText" class="banner bad">
-      无法读取状态：{{ errorText }}
-      <span class="hint">请确认当前用户能访问 SoftEther 控制套接字，或执行一次提权启动。</span>
+      {{ t('overview.readError', { error: errorText }) }}
+      <span class="hint">{{ t('overview.readErrorHint') }}</span>
     </div>
 
     <div v-if="!overview?.vpncmdReady" class="banner warn">
-      找不到 <span class="mono">vpncmd</span>。请先安装 SoftEther VPN Client，或在“设置”里指定客户端目录。
+      {{ t('overview.vpncmdMissingPrefix') }}<span class="mono">vpncmd</span>{{ t('overview.vpncmdMissingSuffix') }}
     </div>
 
     <div v-if="overview && !overview.serviceRunning" class="banner off">
-      <span>VPN 客户端服务未运行，配置列表不可用。</span>
+      <span>{{ t('overview.serviceDown') }}</span>
       <button class="ghost" :disabled="!!busy" @click="startService">
-        <Power :size="14" /> 启动服务
+        <Power :size="14" /> {{ t('overview.startService') }}
       </button>
     </div>
 
@@ -181,25 +219,25 @@ watch(
       <div class="status-main">
         <div class="row">
           <span class="badge" :class="snapshot ? 'ok' : 'off'">
-            <i class="dot" />{{ snapshot ? '已连接' : overview?.serviceRunning ? '未连接' : '服务未启动' }}
+            <i class="dot" />{{ snapshot ? t('status.connected') : overview?.serviceRunning ? t('status.disconnected') : t('status.serviceDown') }}
           </span>
           <span v-if="snapshot" class="strong">{{ snapshot.name }}</span>
-          <span v-else class="muted">选择一个配置发起连接</span>
+          <span v-else class="muted">{{ t('overview.chooseAccount') }}</span>
         </div>
         <div class="meta">
-          <span v-if="snapshot">服务器 <span class="mono">{{ snapshot.host }}</span></span>
-          <span v-if="snapshot">HUB <span class="mono">{{ snapshot.hub || '—' }}</span></span>
+          <span v-if="snapshot">{{ t('overview.server') }} <span class="mono">{{ snapshot.host }}</span></span>
+          <span v-if="snapshot">{{ t('overview.hub') }} <span class="mono">{{ snapshot.hub || '—' }}</span></span>
           <span v-if="overview?.iface">
-            网卡 <span class="mono">{{ overview.iface }} · {{ overview.ifaceIpv4 ?? '无 IPv4' }} · MTU {{ overview.ifaceMtu ?? '—' }}</span>
+            {{ t('overview.interface') }} <span class="mono">{{ overview.iface }} · {{ overview.ifaceIpv4 ?? t('common.noIpv4') }} · MTU {{ overview.ifaceMtu ?? '—' }}</span>
           </span>
-          <span v-if="elapsed !== null">已连接 {{ formatDuration(elapsed) }}</span>
+          <span v-if="elapsed !== null">{{ t('overview.connectedFor', { duration: formatDuration(elapsed) }) }}</span>
         </div>
         <div v-if="snapshot" class="flags">
-          <span class="badge" :class="snapshot.udpAccel === '是' ? 'warn' : 'off'">
-            UDP 加速 {{ snapshot.udpAccel === '是' ? '已激活' : '未启用' }}
+          <span class="badge" :class="isYes(snapshot.udpAccel) ? 'warn' : 'off'">
+            {{ t('overview.udpAccel') }} {{ isYes(snapshot.udpAccel) ? t('overview.active') : t('overview.inactive') }}
           </span>
-          <span class="badge off">TCP {{ snapshot.tcpConnections || '—' }} 连接</span>
-          <span class="badge off">{{ snapshot.encrypted || '加密状态未知' }}</span>
+          <span class="badge off">{{ t('overview.tcpConnections', { n: snapshot.tcpConnections || '—' }) }}</span>
+          <span class="badge off">{{ localizeFlag(snapshot.encrypted) || t('overview.encryptionUnknown') }}</span>
         </div>
       </div>
 
@@ -210,7 +248,7 @@ watch(
           :disabled="!!busy"
           @click="disconnectAccount(snapshot.name)"
         >
-          <Plug :size="14" /> {{ busy === `disconnect:${snapshot.name}` ? '断开中…' : '断开' }}
+          <Plug :size="14" /> {{ busy === `disconnect:${snapshot.name}` ? t('common.disconnecting') : t('common.disconnect') }}
         </button>
         <button
           v-else-if="accounts.length"
@@ -218,41 +256,41 @@ watch(
           :disabled="!!busy || !overview?.serviceRunning"
           @click="connectAccount(settings?.activeAccount || accounts[0].name)"
         >
-          <PlugZap :size="14" /> 连接 {{ settings?.activeAccount || accounts[0].name }}
+          <PlugZap :size="14" /> {{ t('common.connect') }} {{ settings?.activeAccount || accounts[0].name }}
         </button>
         <button
           v-if="!snapshot && overview?.serviceRunning"
           class="ghost"
           :disabled="!!busy"
-          title="停止 SoftEther 客户端服务"
+          :title="t('overview.stopTooltip')"
           @click="stopService()"
         >
-          <Power :size="14" /> 停止服务
+          <Power :size="14" /> {{ t('overview.stopService') }}
         </button>
       </div>
     </div>
 
     <div v-if="overview?.routeWarnings?.length" class="banner warn">
-      {{ overview.routeWarnings.join('；') }}
+      {{ joinWarnings(overview.routeWarnings) }}
     </div>
 
     <div class="grid">
       <div class="card metric">
-        <span class="label">下载</span>
+        <span class="label">{{ t('overview.download') }}</span>
         <strong class="value">{{ formatRate(currentRate.rx) }}</strong>
-        <span class="hint">累计 {{ formatBytes(snapshot?.rxBytes ?? 0) }} · {{ (snapshot?.rxPackets ?? 0).toLocaleString() }} 包</span>
+        <span class="hint">{{ t('overview.cumulative', { size: formatBytes(snapshot?.rxBytes ?? 0), packets: (snapshot?.rxPackets ?? 0).toLocaleString() }) }}</span>
         <Sparkline :values="rates.map((item) => item.rx)" tone="accent" />
       </div>
       <div class="card metric">
-        <span class="label">上传</span>
+        <span class="label">{{ t('overview.upload') }}</span>
         <strong class="value">{{ formatRate(currentRate.tx) }}</strong>
-        <span class="hint">累计 {{ formatBytes(snapshot?.txBytes ?? 0) }} · {{ (snapshot?.txPackets ?? 0).toLocaleString() }} 包</span>
+        <span class="hint">{{ t('overview.cumulative', { size: formatBytes(snapshot?.txBytes ?? 0), packets: (snapshot?.txPackets ?? 0).toLocaleString() }) }}</span>
         <Sparkline :values="rates.map((item) => item.tx)" tone="ok" />
       </div>
       <div class="card metric">
-        <span class="label">路由</span>
-        <strong class="value">{{ overview?.routes.length ?? 0 }} 条</strong>
-        <span class="hint">{{ overview?.iface ? `经 ${overview.iface}` : '尚未建立隧道' }}</span>
+        <span class="label">{{ t('overview.routes') }}</span>
+        <strong class="value">{{ t('overview.routeCount', { n: overview?.routes.length ?? 0 }) }}</strong>
+        <span class="hint">{{ overview?.iface ? t('overview.viaIface', { iface: overview.iface }) : t('overview.noTunnel') }}</span>
         <ul class="route-list mono">
           <li v-for="route in (overview?.routes ?? []).slice(0, 4)" :key="route">{{ route }}</li>
           <li v-if="(overview?.routes?.length ?? 0) > 4" class="hint">…</li>
@@ -262,27 +300,27 @@ watch(
 
     <div class="card list">
       <header class="list-head">
-        <h2>连接配置</h2>
-        <span class="hint">配置直接来自 SoftEther 客户端，共 {{ accounts.length }} 个</span>
+        <h2>{{ t('overview.accountsTitle') }}</h2>
+        <span class="hint">{{ t('overview.accountsHint', { n: accounts.length }) }}</span>
       </header>
       <div v-if="!accounts.length" class="empty">
-        <p class="muted">还没有连接配置。</p>
-        <button class="primary" @click="creating = true"><Plus :size="14" /> 新建第一个配置</button>
+        <p class="muted">{{ t('overview.noAccounts') }}</p>
+        <button class="primary" @click="creating = true"><Plus :size="14" /> {{ t('overview.createFirst') }}</button>
       </div>
       <ul>
         <li v-for="account in accounts" :key="account.name" :class="{ active: snapshot?.name === account.name }">
           <div class="acct">
             <div class="row">
               <span class="badge" :class="isConnected(account) ? 'ok' : 'off'">
-                <i class="dot" />{{ account.status || '未知' }}
+                <i class="dot" />{{ localizeStatus(account.status) }}
               </span>
               <span class="strong">{{ account.name }}</span>
-              <span v-if="settings?.activeAccount === account.name" class="badge off">默认</span>
+              <span v-if="settings?.activeAccount === account.name" class="badge off">{{ t('overview.default') }}</span>
             </div>
             <div class="meta">
               <span class="mono">{{ account.host }}:{{ account.port ?? 443 }}</span>
-              <span>HUB <span class="mono">{{ account.hub || '—' }}</span></span>
-              <span>网卡 <span class="mono">{{ account.nic || '—' }}</span></span>
+              <span>{{ t('overview.hub') }} <span class="mono">{{ account.hub || '—' }}</span></span>
+              <span>{{ t('overview.interface') }} <span class="mono">{{ account.nic || '—' }}</span></span>
             </div>
           </div>
           <div class="row actions">
@@ -292,24 +330,24 @@ watch(
               :disabled="!!busy || !overview?.serviceRunning"
               @click="connectAccount(account.name)"
             >
-              <PlugZap :size="14" /> {{ busy === `connect:${account.name}` ? '连接中…' : '连接' }}
+              <PlugZap :size="14" /> {{ busy === `connect:${account.name}` ? t('common.connecting') : t('common.connect') }}
             </button>
             <button v-else class="ghost" :disabled="!!busy" @click="disconnectAccount(account.name)">
-              <Plug :size="14" /> 断开
+              <Plug :size="14" /> {{ t('common.disconnect') }}
             </button>
-            <button class="ghost" :disabled="!!busy" title="编辑" @click="openEdit(account.name)">
+            <button class="ghost" :disabled="!!busy" :title="t('common.edit')" @click="openEdit(account.name)">
               <Pencil :size="14" />
             </button>
-            <button class="danger" :disabled="!!busy" title="删除" @click="confirmDelete(account.name)">
+            <button class="danger" :disabled="!!busy" :title="t('common.delete')" @click="confirmDelete(account.name)">
               <Trash2 :size="14" />
             </button>
           </div>
         </li>
       </ul>
       <footer class="list-foot">
-        <span class="hint">客户端目录</span>
-        <span class="mono">{{ overview?.vpnDir ?? '未找到' }}</span>
-        <button class="ghost small" @click="revealConfig"><FolderOpen :size="13" /> 打开设置目录</button>
+        <span class="hint">{{ t('overview.clientDir') }}</span>
+        <span class="mono">{{ overview?.vpnDir ?? t('common.notFound') }}</span>
+        <button class="ghost small" @click="revealConfig"><FolderOpen :size="13" /> {{ t('overview.openConfigDir') }}</button>
       </footer>
     </div>
 
@@ -318,13 +356,13 @@ watch(
 
     <div v-if="deleting" class="overlay" @click.self="deleting = null">
       <div class="dialog" style="max-width: 420px">
-        <header><h2>删除连接配置</h2></header>
+        <header><h2>{{ t('overview.deleteTitle') }}</h2></header>
         <p class="muted">
-          这会从 SoftEther 客户端删除 <span class="mono">{{ deleting }}</span>，不影响正在使用的其他配置。
+          {{ t('overview.deletePrefix') }}<span class="mono">{{ deleting }}</span>{{ t('overview.deleteSuffix') }}
         </p>
         <div class="row" style="justify-content: flex-end; margin-top: 16px">
-          <button class="ghost" @click="deleting = null">取消</button>
-          <button class="danger" @click="doDelete(deleting)">删除</button>
+          <button class="ghost" @click="deleting = null">{{ t('common.cancel') }}</button>
+          <button class="danger" @click="doDelete(deleting)">{{ t('common.delete') }}</button>
         </div>
       </div>
     </div>

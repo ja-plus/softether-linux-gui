@@ -35,10 +35,18 @@ pub struct AccountInput {
 fn validate_name(name: &str) -> Result<(), String> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 64 {
-        return Err("配置名称不能为空，且不能超过 64 个字符".into());
+        return Err(crate::i18n::tr(
+            "配置名称不能为空，且不能超过 64 个字符",
+            "The profile name cannot be empty and must be at most 64 characters.",
+        )
+        .into());
     }
     if name.starts_with('-') || name.chars().any(|c| c.is_control()) {
-        return Err("配置名称不能以 - 开头，也不能包含控制字符".into());
+        return Err(crate::i18n::tr(
+            "配置名称不能以 - 开头，也不能包含控制字符",
+            "The profile name cannot start with - or contain control characters.",
+        )
+        .into());
     }
     Ok(())
 }
@@ -46,10 +54,14 @@ fn validate_name(name: &str) -> Result<(), String> {
 fn validate_host(host: &str) -> Result<(), String> {
     let host = host.trim();
     if host.is_empty() || host.starts_with('-') || host.len() > 253 {
-        return Err("服务器地址不合法".into());
+        return Err(crate::i18n::tr("服务器地址不合法", "Invalid server address.").into());
     }
     if !host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':')) {
-        return Err("服务器地址只能包含字母、数字、点、连字符和冒号".into());
+        return Err(crate::i18n::tr(
+            "服务器地址只能包含字母、数字、点、连字符和冒号",
+            "The server address may contain only letters, digits, dots, hyphens and colons.",
+        )
+        .into());
     }
     Ok(())
 }
@@ -57,17 +69,29 @@ fn validate_host(host: &str) -> Result<(), String> {
 fn validate_hub(hub: &str) -> Result<(), String> {
     let hub = hub.trim();
     if hub.is_empty() || hub.starts_with('-') {
-        return Err("虚拟 HUB 名称不能为空".into());
+        return Err(crate::i18n::tr(
+            "虚拟 HUB 名称不能为空",
+            "The virtual HUB name cannot be empty.",
+        )
+        .into());
     }
     if !hub.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')) {
-        return Err("虚拟 HUB 名称只能包含字母、数字、下划线、连字符和点".into());
+        return Err(crate::i18n::tr(
+            "虚拟 HUB 名称只能包含字母、数字、下划线、连字符和点",
+            "The virtual HUB name may contain only letters, digits, underscores, hyphens and dots.",
+        )
+        .into());
     }
     Ok(())
 }
 
 fn validate_port(port: u16) -> Result<(), String> {
     if port == 0 {
-        return Err("端口必须在 1-65535 之间".into());
+        return Err(crate::i18n::tr(
+            "端口必须在 1-65535 之间",
+            "The port must be between 1 and 65535.",
+        )
+        .into());
     }
     Ok(())
 }
@@ -83,7 +107,13 @@ fn with_password_file<T>(password: &str, action: impl FnOnce(&str) -> Result<T, 
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options.open(&path).map_err(|e| format!("无法创建临时文件: {e}"))?;
+        let mut file = options.open(&path).map_err(|e| {
+            crate::i18n::tr(
+                &format!("无法创建临时文件: {e}"),
+                &format!("Cannot create a temporary file: {e}"),
+            )
+            .to_string()
+        })?;
         file.write_all(password.as_bytes()).map_err(|e| e.to_string())?;
         file.flush().map_err(|e| e.to_string())?;
         drop(file);
@@ -99,10 +129,14 @@ pub fn save_account(existing: Option<&str>, input: &AccountInput, settings: &Set
     validate_hub(&input.hub)?;
     validate_port(input.port)?;
     if input.user.trim().is_empty() {
-        return Err("用户名不能为空".into());
+        return Err(crate::i18n::tr("用户名不能为空", "The user name cannot be empty.").into());
     }
     if settings::find_vpn_dir(settings).is_none() {
-        return Err("找不到 SoftEther VPN Client 目录".into());
+        return Err(crate::i18n::tr(
+            "找不到 SoftEther VPN Client 目录",
+            "Cannot find the SoftEther VPN Client directory.",
+        )
+        .into());
     }
 
     let name = input.name.trim();
@@ -213,7 +247,13 @@ pub fn ping(host: &str, count: u32) -> Result<crate::softether::DiagResult, Stri
         .args(["-c", &count, "-i", "0.5", "-W", "1", host])
         .stdin(Stdio::null())
         .output()
-        .map_err(|e| format!("无法执行 ping: {e}"))?;
+        .map_err(|e| {
+            crate::i18n::tr(
+                &format!("无法执行 ping: {e}"),
+                &format!("Cannot run ping: {e}"),
+            )
+            .to_string()
+        })?;
     let text = String::from_utf8_lossy(&output.stdout).to_string();
     Ok(crate::softether::parse_ping(host, &text))
 }

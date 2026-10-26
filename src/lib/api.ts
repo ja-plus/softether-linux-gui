@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { ref } from 'vue'
+import { applyLocale, t } from './i18n'
 
 export interface AccountSummary {
   name: string
@@ -48,6 +49,15 @@ export interface Overview {
   vpnDir: string | null
   routes: string[]
   routeWarnings: string[]
+  /**
+   * 虚拟网卡累计收发字节（后端读 sysfs）。
+   *
+   * 实时速率必须用这两个值算，不要用 `snapshot.rxBytes`：后者来自
+   * `AccountStatusGet`，后端为它缓存了几秒，2 秒一轮的速率刷新会一直是台阶状。
+   * 累计量展示仍用 `snapshot.rxBytes`（会话层语义）。
+   */
+  linkRxBytes: number
+  linkTxBytes: number
 }
 
 export interface RouteConfig {
@@ -57,8 +67,27 @@ export interface RouteConfig {
   mtu: number
 }
 
+/** 客户端目录的来源，对应设置页的三个选项 */
+export type ClientSource = 'bundled' | 'detected' | 'custom'
+
+export interface ClientCandidate {
+  /** 目录绝对路径 */
+  dir: string
+  source: ClientSource
+  /** 必需文件是否齐备（vpnclient + vpncmd + hamcore.se2） */
+  usable: boolean
+  /** 不可用时的具体缺项，直接展示给用户 */
+  problem: string | null
+  /** 客户端版本，取不到为 null */
+  version: string | null
+  /** 目录可写：不可写时客户端写不了自己的配置与日志 */
+  writable: boolean
+}
+
 export interface Settings {
   vpnDir: string | null
+  /** 客户端来源；null 表示老配置，按 builtin 处理 */
+  clientSource: ClientSource | null
   vpncmdPath: string | null
   activeAccount: string | null
   notifications: boolean
@@ -71,6 +100,8 @@ export interface Settings {
   stopClientOnExit: boolean
   /** 界面风格："win11" 或 "deepin"，其余取值按 win11 处理 */
   uiStyle: string
+  /** 界面语言："zh" 或 "en"，其余取值按 zh 处理 */
+  locale: string
 }
 
 export type UiStyle = 'win11' | 'deepin'
@@ -143,6 +174,7 @@ export async function loadOverview() {
 export async function loadSettings() {
   settings.value = await invoke<Settings>('get_settings')
   applyUiStyle(settings.value.uiStyle)
+  applyLocale(settings.value.locale)
 }
 
 /**
@@ -155,7 +187,7 @@ export async function loadSettings() {
  */
 export async function run<T>(key: string, action: () => Promise<T>): Promise<T | null> {
   if (busy.value) {
-    showToast('上一个操作还没完成，请稍候')
+    showToast(t('common.busy'))
     return null
   }
   busy.value = key
@@ -179,7 +211,7 @@ function isOverview(value: unknown): value is Overview {
 export function connectAccount(name: string) {
   return run(`connect:${name}`, async () => {
     const result = await invoke<Overview>('connect', { name })
-    showToast(`${name} 已连接`)
+    showToast(t('app.toastConnected', { name }))
     return result
   })
 }
@@ -187,7 +219,7 @@ export function connectAccount(name: string) {
 export function disconnectAccount(name: string) {
   return run(`disconnect:${name}`, async () => {
     const result = await invoke<Overview>('disconnect', { name })
-    showToast(`${name} 已断开`)
+    showToast(t('app.toastDisconnected', { name }))
     return result
   })
 }
@@ -195,7 +227,7 @@ export function disconnectAccount(name: string) {
 export function startService() {
   return run('service', async () => {
     const result = await invoke<Overview>('start_service')
-    showToast('VPN 服务已启动')
+    showToast(t('app.toastServiceStarted'))
     return result
   })
 }
@@ -203,7 +235,7 @@ export function startService() {
 export function stopService() {
   return run('service', async () => {
     const result = await invoke<Overview>('stop_service')
-    showToast('VPN 服务已停止')
+    showToast(t('app.toastServiceStopped'))
     return result
   })
 }
@@ -262,7 +294,50 @@ export function formatDuration(seconds: number): string {
   const hours = Math.floor(seconds / 3600)
   const minutes = Math.floor((seconds % 3600) / 60)
   const secs = Math.floor(seconds % 60)
-  if (hours > 0) return `${hours} 小时 ${minutes} 分`
-  if (minutes > 0) return `${minutes} 分 ${secs} 秒`
-  return `${secs} 秒`
+  if (hours > 0) return t('duration.hoursMinutes', { h: hours, m: minutes })
+  if (minutes > 0) return t('duration.minutesSeconds', { m: minutes, s: secs })
+  return t('duration.seconds', { s: secs })
+}
+
+/** vpncmd 的输出语言跟随客户端 lang.config，状态值可能是中文或英文，显示前统一翻译 */
+export function localizeStatus(value?: string | null): string {
+  if (!value) return t('common.unknown')
+  // 先排除否定状态：`Not Connected` 里也含有 `Connected`
+  if (value.includes('未连接') || value.toLowerCase().includes('not connected')) {
+    return t('status.disconnected')
+  }
+  const known: [string, Parameters<typeof t>[0]][] = [
+    ['连接完成', 'status.completed'],
+    ['Connection Completed', 'status.completed'],
+    ['已连接', 'status.connected'],
+    ['Connected', 'status.connected'],
+    ['连接中', 'status.connecting'],
+    ['Connecting', 'status.connecting'],
+  ]
+  for (const [needle, key] of known) {
+    if (value.includes(needle)) return t(key)
+  }
+  return value
+}
+
+/** 账户是否处于已连接状态。中英文输出都要认，且不能把“未连接”误判成已连接。 */
+export function isAccountConnected(status?: string | null): boolean {
+  const value = status ?? ''
+  if (value.includes('未连接') || value.toLowerCase().includes('not connected')) return false
+  return ['已连接', '连接完成', '连接中', 'Connected', 'Connection Completed', 'Connecting'].some((needle) =>
+    value.includes(needle),
+  )
+}
+
+/** vpncmd 的布尔值随语言变化：中文“是/否”、英文 Yes/No */
+export function isYes(value?: string | null): boolean {
+  return value === '是' || /^yes$/i.test(value?.trim() ?? '')
+}
+
+/** 加密等开关字段可能带后缀（如 “已启用 (算法: TLS)”), 只翻译前缀 */
+export function localizeFlag(value?: string | null): string {
+  const text = value ?? ''
+  if (text.startsWith('已启用')) return t('common.enabled') + text.slice(3)
+  if (text.startsWith('已禁用')) return t('common.disabled') + text.slice(3)
+  return text
 }

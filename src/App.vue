@@ -8,6 +8,7 @@ import SettingsTab from './components/SettingsTab.vue'
 import TitleBar from './components/TitleBar.vue'
 import ResizeEdges from './components/ResizeEdges.vue'
 import { bootstrap, overview, toast } from './lib/api'
+import { t } from './lib/i18n'
 import { invoke } from '@tauri-apps/api/core'
 
 const tab = ref<'overview' | 'diag' | 'settings'>('overview')
@@ -39,19 +40,19 @@ async function quit() {
       <aside class="side">
         <nav>
           <button :class="{ active: tab === 'overview' }" @click="tab = 'overview'">
-            <LayoutList :size="15" /> 连接
-            <span class="pill" :class="overview?.snapshot ? 'ok' : 'off'">{{ overview?.snapshot ? '已连' : '未连' }}</span>
+            <LayoutList :size="15" /> {{ t('app.nav.connections') }}
+            <span class="pill" :class="overview?.snapshot ? 'ok' : 'off'">{{ overview?.snapshot ? t('app.badge.connected') : t('app.badge.offline') }}</span>
           </button>
           <button :class="{ active: tab === 'diag' }" @click="tab = 'diag'">
-            <Activity :size="15" /> 网络诊断
+            <Activity :size="15" /> {{ t('app.nav.diag') }}
           </button>
           <button :class="{ active: tab === 'settings' }" @click="tab = 'settings'">
-            <SettingsIcon :size="15" /> 设置
+            <SettingsIcon :size="15" /> {{ t('app.nav.settings') }}
           </button>
         </nav>
         <div class="side-foot">
-          <p class="hint">关闭窗口后仍在后台运行，从托盘图标重新打开。</p>
-          <button class="ghost small" @click="quit"><LogOut :size="13" /> 退出应用</button>
+          <p class="hint">{{ t('app.sidebarHint') }}</p>
+          <button class="ghost small" @click="quit"><LogOut :size="13" /> {{ t('app.quit') }}</button>
         </div>
       </aside>
 
