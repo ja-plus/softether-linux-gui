@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { Activity, Play } from 'lucide-vue-next'
 import { formatBytes, overview, settings, showToast, type DiagResult } from '../lib/api'
+import NumberInput from './NumberInput.vue'
 import { t } from '../lib/i18n'
 
 const target = ref('')
@@ -70,7 +71,7 @@ function quality(result: DiagResult): { text: string; tone: string } {
         </div>
         <div class="field" style="width: 110px">
           <label>{{ t('diag.count') }}</label>
-          <input v-model.number="count" type="number" min="1" max="100" />
+          <NumberInput v-model="count" :min="1" :max="100" />
         </div>
         <button class="primary" :disabled="running || !target.trim()" @click="runCheck">
           <Play :size="14" /> {{ running ? t('diag.running') : t('diag.start') }}

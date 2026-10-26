@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { X, Plus, Check } from 'lucide-vue-next'
 import SelectInput from './SelectInput.vue'
+import NumberInput from './NumberInput.vue'
 import { busy, showToast, overview, run, type AccountDetail, type Overview } from '../lib/api'
 import { t } from '../lib/i18n'
 
@@ -119,7 +120,7 @@ async function addNic() {
           </div>
           <div class="field">
             <label>{{ t('account.port') }}</label>
-            <input v-model.number="form.port" type="number" min="1" max="65535" />
+            <NumberInput v-model="form.port" :min="1" :max="65535" :step="1" />
           </div>
         </div>
 
@@ -170,7 +171,7 @@ async function addNic() {
           </label>
           <div class="field" style="max-width: 150px">
             <label>{{ t('account.maxTcp') }}</label>
-            <input v-model.number="form.maxTcp" type="number" min="1" max="32" />
+            <NumberInput v-model="form.maxTcp" :min="1" :max="32" />
           </div>
         </div>
 
@@ -235,7 +236,7 @@ async function addNic() {
   gap: 6px;
   font-size: 13px;
   color: var(--text-soft);
-  min-height: 32px;
+  min-height: 34px;
 }
 
 .note {

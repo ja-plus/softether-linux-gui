@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { Check, Plus, RefreshCw, Save, RotateCcw, ShieldCheck, TriangleAlert } from 'lucide-vue-next'
+import { Check, Plus, RefreshCw, RotateCcw, ShieldCheck, TriangleAlert } from 'lucide-vue-next'
 import SelectInput, { type SelectOption } from './SelectInput.vue'
+import NumberInput from './NumberInput.vue'
 import {
   applyUiStyle,
   loadSettings,
@@ -34,8 +35,31 @@ const draft = reactive<Settings>({
 const newSubnet = ref('')
 const autostart = ref(false)
 const configDir = ref('')
-const saving = ref(false)
 const error = ref('')
+
+// ── 即时保存 ────────────────────────────────────────────────────────
+//
+// 设置页没有「保存」按钮：改完就落盘。500ms 内的连续改动合并成一次写盘，
+// 免得手填路径时每敲一个字符写一次配置文件。
+//
+// 只有两种情况不落盘——「选了来源却没选目录」和「MTU 越界」：
+// 存进去就是一份自相矛盾的配置，下次连接报的错会莫名其妙。
+// 这时底部状态栏直接说明原因，改对了自动接着存。
+
+type AutoState = 'idle' | 'saving' | 'saved' | 'blocked' | 'error'
+
+const autoState = ref<AutoState>('idle')
+const autoError = ref('')
+const blockReason = ref('')
+
+let saveTimer: number | undefined
+let flashTimer: number | undefined
+/** 已落盘那份配置的指纹，用来判断「这次改动是不是真的变了」 */
+let savedFingerprint = ''
+/** 已落盘的客户端目录，用来决定保存后要不要重扫/重校验 */
+let savedDir: string | null = null
+/** 自己写回 settings 时置位，避免回填把正在编辑的 draft 冲掉 */
+let echoGuard = false
 
 // ── 客户端目录的三种来源 ────────────────────────────────────────────
 //
@@ -186,9 +210,129 @@ function fill(source: Settings) {
   })
 }
 
+/**
+ * 发出去的那份配置。
+ *
+ * 「内置客户端」不看路径，所以这里强制把 vpnDir 归零：既不会把上次
+ * 选过的目录写进配置，也保证下面算指纹时两次可比较。
+ * draft 里的 vpnDir 仍然留着，切回「搜索到的」时还能选回原来那个。
+ */
+function snapshot(source: Settings = draft): Settings {
+  const out: Settings = {
+    ...source,
+    routes: { ...source.routes, subnets: [...source.routes.subnets] },
+  }
+  if ((out.clientSource ?? 'bundled') === 'bundled') out.vpnDir = null
+  return out
+}
+
+/**
+ * 配置指纹：只回答「和已落盘的那份相比变没变」。
+ *
+ * 键名必须排序后再序列化——Rust 侧序列化的字段顺序和这里不一样，
+ * 不排序的话同一份配置会算出两个指纹，导致每次进页面都白写一次磁盘。
+ */
+function fingerprint(source: Settings): string {
+  return JSON.stringify(snapshot(source), (_key, value) =>
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]]))
+      : value,
+  )
+}
+
+/** 这份 draft 能不能落盘；返回不能保存的原因，null 表示可以 */
+function blockedBecause(): string | null {
+  const source = draft.clientSource ?? 'bundled'
+  if (source !== 'bundled' && !draft.vpnDir?.trim()) {
+    return source === 'custom' ? t('client.fillPath') : t('client.chooseDir')
+  }
+  const mtu = Number(draft.routes.mtu)
+  if (!Number.isFinite(mtu) || mtu < 576 || mtu > 1500) return t('settings.mtuRange')
+  return null
+}
+
+/**
+ * 落盘。所有改动最终都收到这里，包括离开页面时那一次补写。
+ *
+ * 失败不回滚 draft：用户填的东西不能因为一次写盘失败就消失，
+ * 状态栏会挂出后端给的原文，点「重试保存」再来一次。
+ */
+async function persist() {
+  window.clearTimeout(saveTimer)
+  saveTimer = undefined
+
+  const payload = snapshot()
+  if (fingerprint(payload) === savedFingerprint) return
+
+  // 上一次写盘还没回来：排到队尾再来一次，别让两个请求抢同一个配置文件
+  if (autoState.value === 'saving') {
+    queueSave()
+    return
+  }
+
+  const blocked = blockedBecause()
+  if (blocked) {
+    blockReason.value = blocked
+    autoState.value = 'blocked'
+    return
+  }
+
+  blockReason.value = ''
+  autoState.value = 'saving'
+  autoError.value = ''
+  try {
+    const saved = await invoke<Settings>('save_settings', { settings: payload })
+    savedFingerprint = fingerprint(payload)
+    echoGuard = true
+    settings.value = saved
+    autoState.value = 'saved'
+    window.clearTimeout(flashTimer)
+    flashTimer = window.setTimeout(() => {
+      if (autoState.value === 'saved') autoState.value = 'idle'
+    }, 1800)
+
+    // 目录换了才重扫/重校验：其余开关不值得为它们再跑一轮扫描
+    const dir = saved.vpnDir ?? null
+    if (dir !== savedDir) {
+      savedDir = dir
+      void scanClients(true)
+      if ((saved.clientSource ?? 'bundled') === 'custom' && dir) void checkCustomDir()
+    }
+  } catch (err) {
+    autoState.value = 'error'
+    autoError.value = String(err)
+  }
+}
+
+/** 改动排一次保存；连续改动只写最后那一次 */
+function queueSave() {
+  window.clearTimeout(saveTimer)
+  saveTimer = window.setTimeout(() => void persist(), 500)
+}
+
+const autoText = computed(() => {
+  switch (autoState.value) {
+    case 'saving':
+      return t('common.saving')
+    case 'saved':
+      return t('settings.saved')
+    case 'blocked':
+      return t('settings.pendingHint', { reason: blockReason.value })
+    case 'error':
+      return autoError.value
+    default:
+      return t('settings.autoSaveHint')
+  }
+})
+
 onMounted(async () => {
   await loadSettings()
   if (settings.value) fill(settings.value)
+  // 基准值要在回填之后再取，否则第一次改动会和空指纹比较
+  if (settings.value) {
+    savedFingerprint = fingerprint(settings.value)
+    savedDir = settings.value.vpnDir ?? null
+  }
   autostart.value = await invoke<boolean>('autostart_enabled')
   configDir.value = await invoke<string>('config_dir_path')
   // 扫盘放在最后：它最慢（几百毫秒），不能让上面的内容跟着等
@@ -196,7 +340,15 @@ onMounted(async () => {
 })
 
 watch(settings, (value) => {
-  if (value) fill(value)
+  if (!value) return
+  // 刚由本页写下去的那一份不回填：回填会清掉 draft 里记住的目录，
+  // 也会把用户正在输入的路径打断
+  if (echoGuard) {
+    echoGuard = false
+    return
+  }
+  fill(value)
+  savedFingerprint = fingerprint(value)
 })
 
 function pickStyle(style: UiStyle) {
@@ -222,11 +374,16 @@ watch(
   (value) => applyLocale(value),
 )
 
-// 没保存就切走页面：撤销实时预览，回到已保存的风格与语言
+// 页面上任何一处改动都排队保存；这一层是"不用点保存"的全部实现
+watch(draft, queueSave, { deep: true })
+
+// 切走页面时还在 500ms 窗口里的改动要立刻写掉，不能丢
 onBeforeUnmount(() => {
-  if (settings.value) {
-    applyUiStyle(settings.value.uiStyle)
-    applyLocale(settings.value.locale)
+  window.clearTimeout(flashTimer)
+  if (saveTimer !== undefined) {
+    window.clearTimeout(saveTimer)
+    saveTimer = undefined
+    void persist()
   }
 })
 
@@ -262,33 +419,6 @@ async function toggleAutostart() {
   }
 }
 
-async function save() {
-  error.value = ''
-  // 先做前端这道：后端也会拦，但在这里拦能给出一句人话
-  const source = draft.clientSource ?? 'bundled'
-  if (source !== 'bundled' && !draft.vpnDir?.trim()) {
-    error.value = source === 'custom' ? t('client.fillPath') : t('client.chooseDir')
-    return
-  }
-  if (source === 'bundled') {
-    // 内置不看路径。留着旧的 vpnDir 会让下次切回"搜索到的"时
-    // 莫名其妙地选中一个用户早就忘掉的目录。
-    draft.vpnDir = null
-  }
-  saving.value = true
-  try {
-    const saved = await invoke<Settings>('save_settings', { settings: { ...draft, routes: { ...draft.routes } } })
-    fill(saved)
-    settings.value = saved
-    showToast(t('settings.saved'))
-    // 目录变了就重扫一次，让「当前使用」标记跟上去
-    void scanClients(true)
-  } catch (err) {
-    error.value = String(err)
-  } finally {
-    saving.value = false
-  }
-}
 </script>
 
 <template>
@@ -439,7 +569,7 @@ async function save() {
       <div class="row wrap" style="margin-top: 12px">
         <div class="field" style="width: 140px">
           <label>{{ t('settings.mtu') }}</label>
-          <input v-model.number="draft.routes.mtu" type="number" min="576" max="1500" />
+          <NumberInput v-model="draft.routes.mtu" :min="576" :max="1500" :step="10" />
         </div>
         <label class="switch">
           <input v-model="draft.routes.dhcp" type="checkbox" />
@@ -573,9 +703,13 @@ async function save() {
     <p v-if="error" class="error">{{ error }}</p>
 
     <div class="foot">
-      <span class="hint">{{ t('settings.saveHint') }}</span>
-      <button class="primary" :disabled="saving" @click="save">
-        <Save :size="14" /> {{ saving ? t('common.saving') : t('settings.saveSettings') }}
+      <span class="auto-status" :class="autoState">
+        <i class="dot" />
+        {{ autoText }}
+      </span>
+      <!-- 写盘失败时给一个明确的重试入口：改别处也能重试，但那太隐蔽了 -->
+      <button v-if="autoState === 'error'" class="ghost" @click="persist">
+        <RefreshCw :size="13" /> {{ t('settings.retrySave') }}
       </button>
     </div>
   </section>
@@ -645,11 +779,55 @@ async function save() {
   padding: 0 4px;
 }
 
+/* 即时保存状态栏：颜色即语义，不额外占一行也不弹 toast。
+   现在没有「保存」按钮了，这条就是唯一的反馈，所以钉在滚动容器底部，
+   滚到哪儿都看得见；负 margin 吃掉容器 padding，让底边横贯整行。 */
 .foot {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
+  margin: 2px -20px -24px;
+  padding: 8px 20px 10px;
+  background: var(--bg);
+  border-top: 0.5px solid var(--line);
+}
+
+.auto-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-hint);
+}
+
+.auto-status.saving {
+  color: var(--text-soft);
+}
+
+.auto-status.saving .dot {
+  animation: status-pulse 1s ease-in-out infinite;
+}
+
+.auto-status.saved {
+  color: var(--ok);
+}
+
+.auto-status.blocked {
+  color: var(--warn);
+}
+
+.auto-status.error {
+  color: var(--danger);
+}
+
+@keyframes status-pulse {
+  50% {
+    opacity: 0.2;
+  }
 }
 
 .foot button,

@@ -312,7 +312,8 @@ input[type="number"] {
   border: 0.5px solid var(--line-strong);
   border-radius: var(--radius-ctl);
   padding: 6px 10px;
-  min-height: 32px;
+  /* 与 .primary/.ghost 按钮、NumberInput 的 34px 统一，同排控件不再差 2px */
+  min-height: 34px;
   color: var(--text);
 }
 

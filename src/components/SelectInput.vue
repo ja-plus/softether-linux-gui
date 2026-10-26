@@ -244,7 +244,7 @@ function onKeydown(event: KeyboardEvent) {
   align-items: center;
   gap: 8px;
   width: 100%;
-  min-height: 32px;
+  min-height: 34px;
   padding: 6px 10px;
   background: var(--panel);
   border: 0.5px solid var(--line-strong);
