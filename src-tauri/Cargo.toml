@@ -26,6 +26,8 @@ serde_json = "1"
 thiserror = "2"
 regex = "1"
 chrono = { version = "0.4", features = ["clock"] }
+libc = "0.2"
+notify-rust = "4"
 
 # Linux 上 tray-icon 默认走 libappindicator 后端，它只把菜单挂成 dbusmenu、
 # 从不实现 StatusNotifierItem 的 Activate。结果是 DDE/KDE 里左键点托盘图标

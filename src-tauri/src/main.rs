@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use tauri::{
@@ -7,6 +8,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, State, WindowEvent,
 };
+#[cfg(not(target_os = "linux"))]
 use tauri_plugin_notification::NotificationExt;
 
 use softether_tray_lib::accounts::{self, AccountInput};
@@ -20,6 +22,13 @@ struct AppState {
     /// 上次建托盘菜单时的内容签名。内容没变就不重建菜单——
     /// Linux 上 set_menu 是一趟 DBus 往返，2 秒一轮的轮询不该反复折腾托盘。
     tray_signature: Mutex<Option<String>>,
+}
+
+static TERMINATION_REQUESTED: AtomicBool = AtomicBool::new(false);
+static SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn termination_signal_handler(_: libc::c_int) {
+    TERMINATION_REQUESTED.store(true, Ordering::SeqCst);
 }
 
 fn state_settings(state: &State<AppState>) -> Settings {
@@ -39,7 +48,17 @@ fn notify(app: &AppHandle, settings: &Settings, title: &str, body: &str) {
         return;
     }
     // 通知失败不能影响连接动作本身，所以只记不抛。
-    if let Err(error) = app.notification().builder().title(title).body(body).show() {
+    #[cfg(target_os = "linux")]
+    let _ = app;
+    #[cfg(target_os = "linux")]
+    let result = notify_rust::Notification::new()
+        .appname("SoftEther Tray")
+        .summary(title)
+        .body(body)
+        .show();
+    #[cfg(not(target_os = "linux"))]
+    let result = app.notification().builder().title(title).body(body).show();
+    if let Err(error) = result {
         let message = if softether_tray_lib::i18n::is_en() {
             format!("Failed to show the desktop notification (the connection itself completed): {error}")
         } else {
@@ -49,30 +68,10 @@ fn notify(app: &AppHandle, settings: &Settings, title: &str, body: &str) {
     }
 }
 
-fn tray_status_text(overview: &Overview) -> String {
-    let en = softether_tray_lib::i18n::is_en();
-    match overview.snapshot.as_ref().filter(|s| s.connected) {
-        Some(snapshot) => {
-            let iface = overview.iface.clone().unwrap_or_else(|| "vpn".into());
-            let mtu = overview.iface_mtu.map(|m| format!(" · MTU {m}")).unwrap_or_default();
-            if en {
-                format!("● {} connected · {}{}", snapshot.name, iface, mtu)
-            } else {
-                format!("● {} 已连接 · {}{}", snapshot.name, iface, mtu)
-            }
-        }
-        None if overview.service_running => {
-            softether_tray_lib::i18n::tr("○ 未连接", "○ Disconnected").to_string()
-        }
-        None => softether_tray_lib::i18n::tr("○ VPN 服务未运行", "○ VPN service not running").to_string(),
-    }
-}
-
 fn rebuild_tray(app: &AppHandle, overview: &Overview) -> tauri::Result<()> {
     let handle = app.clone();
     let connected = overview.snapshot.as_ref().filter(|s| s.connected);
 
-    let status_text = tray_status_text(overview);
     let tooltip = connected
         .map(|snapshot| {
             if softether_tray_lib::i18n::is_en() {
@@ -115,9 +114,9 @@ fn rebuild_tray(app: &AppHandle, overview: &Overview) -> tauri::Result<()> {
         account_items.push((id, label));
     }
 
-    // 状态行、tooltip、账户项就是菜单的全部可变内容；语言变化也必须触发重建
+    // tooltip、账户项就是菜单的全部可变内容；语言变化也必须触发重建
     let signature = format!(
-        "{}\n{status_text}\n{tooltip}\n{}",
+        "{}\n{tooltip}\n{}",
         softether_tray_lib::i18n::current(),
         account_items.iter().map(|(id, label)| format!("{id}={label}")).collect::<Vec<_>>().join("\n")
     );
@@ -131,12 +130,10 @@ fn rebuild_tray(app: &AppHandle, overview: &Overview) -> tauri::Result<()> {
         return Ok(());
     }
 
-    let title = MenuItem::with_id(&handle, "title", "SoftEther Tray", false, None::<&str>)?;
-    let status = MenuItem::with_id(&handle, "status", status_text, false, None::<&str>)?;
     let open = MenuItem::with_id(
         &handle,
         "open",
-        softether_tray_lib::i18n::tr("打开主窗口", "Open main window"),
+        softether_tray_lib::i18n::tr("打开 SoftEther Tray", "Open SoftEther Tray"),
         true,
         None::<&str>,
     )?;
@@ -157,9 +154,6 @@ fn rebuild_tray(app: &AppHandle, overview: &Overview) -> tauri::Result<()> {
     )?;
 
     let mut items: Vec<Box<dyn tauri::menu::IsMenuItem<tauri::Wry>>> = Vec::new();
-    items.push(Box::new(title));
-    items.push(Box::new(status));
-    items.push(Box::new(separator()?));
     items.push(Box::new(open));
     items.push(Box::new(separator()?));
     for (id, label) in account_items {
@@ -206,19 +200,24 @@ fn show_window(app: &AppHandle) {
     }
 }
 
-/// 退出前的统一收尾：按设置决定是否停止客户端。
+/// 退出前的统一收尾：断开当前 VPN；是否停止客户端服务由设置决定。
 ///
 /// 托盘菜单的「退出」和界面里的「退出应用」都必须走这里，
 /// 否则从托盘退出会绕过清理，留下仍在跑的客户端。
 fn shutdown_client(app: &AppHandle) {
+    if SHUTDOWN_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
     let settings = state_settings(&app.state::<AppState>());
-    // 仅在「客户端由本应用拉起」且用户设置了随应用退出时，才停客户端；
-    // 用户自己先开着的 vpnclient 不动，否则退出应用会把别人的连接一起断掉。
-    if settings.stop_client_on_exit && vpn::managed_by_app() && vpn::service_running() {
+    // 应用退出总是断开当前账户，但不擅自关闭用户自己启动的客户端服务。
+    if vpn::service_running() {
         let overview = vpn::read_overview_fresh(&settings);
         if let Some(name) = vpn::active_account(&settings, &overview.accounts) {
             let _ = do_disconnect(app, &name);
         }
+    }
+    // 只有应用自己启动的客户端，且用户打开了对应设置，才停止服务。
+    if settings.stop_client_on_exit && vpn::managed_by_app() && vpn::service_running() {
         // 退出优先：最多等 20 秒授权，超时就带着仍在跑的客户端退出
         let _ = vpn::stop_service(&settings, Some(20));
         vpn::clear_managed();
@@ -280,19 +279,36 @@ fn report_error(app: &AppHandle, title: &str, error: &str) {
     let _ = app.emit("action-error", error.to_string());
 }
 
+fn notify_connected(app: &AppHandle, name: &str, overview: &Overview) {
+    let settings = state_settings(&app.state::<AppState>());
+    let body = overview.iface_ipv4.clone().unwrap_or_else(|| {
+        softether_tray_lib::i18n::tr("已建立隧道", "Tunnel established").to_string()
+    });
+    notify(
+        app,
+        &settings,
+        softether_tray_lib::i18n::tr("VPN 已连接", "VPN connected"),
+        &format!("{name} · {body}"),
+    );
+}
+
+fn notify_disconnected(app: &AppHandle, name: &str) {
+    let settings = state_settings(&app.state::<AppState>());
+    notify(
+        app,
+        &settings,
+        softether_tray_lib::i18n::tr("VPN 已断开", "VPN disconnected"),
+        &format!(
+            "{name} · {}",
+            softether_tray_lib::i18n::tr("已清理网段路由", "Subnet routes cleaned up")
+        ),
+    );
+}
+
 fn connect_account(app: &AppHandle, name: String) {
     match do_connect(app, &name) {
         Ok(overview) => {
-            let body = overview.iface_ipv4.clone().unwrap_or_else(|| {
-                softether_tray_lib::i18n::tr("已建立隧道", "Tunnel established").to_string()
-            });
-            let settings = state_settings(&app.state::<AppState>());
-            notify(
-                app,
-                &settings,
-                softether_tray_lib::i18n::tr("VPN 已连接", "VPN connected"),
-                &format!("{name} · {body}"),
-            );
+            notify_connected(app, &name, &overview);
             publish_with(app, &overview);
         }
         Err(error) => {
@@ -306,16 +322,7 @@ fn connect_account(app: &AppHandle, name: String) {
 fn disconnect_account(app: &AppHandle, name: String) {
     match do_disconnect(app, &name) {
         Ok(overview) => {
-            let settings = state_settings(&app.state::<AppState>());
-            notify(
-                app,
-                &settings,
-                softether_tray_lib::i18n::tr("VPN 已断开", "VPN disconnected"),
-                &format!(
-                    "{name} · {}",
-                    softether_tray_lib::i18n::tr("已清理网段路由", "Subnet routes cleaned up")
-                ),
-            );
+            notify_disconnected(app, &name);
             publish_with(app, &overview);
         }
         Err(error) => {
@@ -531,7 +538,10 @@ async fn connect(app: AppHandle, name: String) -> Result<Overview, String> {
     let result = do_connect(&app, &name);
     // do_connect 成功时已带回最终状态，直接广播它；失败才重新读一份
     match &result {
-        Ok(overview) => publish_with(&app, overview),
+        Ok(overview) => {
+            notify_connected(&app, &name, overview);
+            publish_with(&app, overview);
+        }
         Err(_) => {
             publish(&app);
         }
@@ -543,7 +553,10 @@ async fn connect(app: AppHandle, name: String) -> Result<Overview, String> {
 async fn disconnect(app: AppHandle, name: String) -> Result<Overview, String> {
     let result = do_disconnect(&app, &name);
     match &result {
-        Ok(overview) => publish_with(&app, overview),
+        Ok(overview) => {
+            notify_disconnected(&app, &name);
+            publish_with(&app, overview);
+        }
         Err(_) => {
             publish(&app);
         }
@@ -1069,6 +1082,25 @@ fn main() {
         ])
         .setup(|app| {
             let handle = app.handle().clone();
+            #[cfg(target_os = "linux")]
+            unsafe {
+                libc::signal(
+                    libc::SIGTERM,
+                    termination_signal_handler as *const () as libc::sighandler_t,
+                );
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let signal_handle = handle.clone();
+                std::thread::spawn(move || loop {
+                    if TERMINATION_REQUESTED.swap(false, Ordering::SeqCst) {
+                        shutdown_client(&signal_handle);
+                        signal_handle.exit(0);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                });
+            }
             let settings = state_settings(&app.state::<AppState>());
             publish(&handle);
 
