@@ -4,6 +4,8 @@
 
 A SoftEther VPN client that lives in the Linux system tray. The official SoftEther distribution ships a Windows Client Manager only — on Linux you get `vpncmd` — so this app adds a GUI on top of it.
 
+![SoftEther Tray main window](app-screenshot-en.png)
+
 ## Features
 
 - Reads **all existing connection profiles** from the SoftEther client; no shadow copy of the configuration

@@ -4,6 +4,8 @@
 
 一个挂在 Linux 系统托盘的 SoftEther VPN 客户端。官方只提供 Windows 的 Client Manager，Linux 版只有 `vpncmd`，这个应用就是给它补上一层 GUI。
 
+![SoftEther Tray 主界面](app-screenshot-zh.png)
+
 ## 能做什么
 
 - 读 SoftEther 客户端里**已有的全部连接配置**，不另存一份影子配置
