@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { Activity, Play } from 'lucide-vue-next'
 import { formatBytes, overview, settings, showToast, type DiagResult } from '../lib/api'
 import NumberInput from './NumberInput.vue'
+import InfoTip from './InfoTip.vue'
 import { t } from '../lib/i18n'
 
 const target = ref('')
@@ -76,11 +77,9 @@ function quality(result: DiagResult): { text: string; tone: string } {
 <template>
   <section class="diag">
     <header class="head">
-      <div>
+      <div class="title-line">
         <h1>{{ t('diag.title') }}</h1>
-        <p class="hint">
-          {{ t('diag.subtitle') }}
-        </p>
+        <InfoTip :text="t('diag.subtitle')" />
       </div>
     </header>
 
@@ -163,8 +162,15 @@ function quality(result: DiagResult): { text: string; tone: string } {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  height: 100%;
+  flex: 1 1 auto;
   min-height: 0;
+  overflow-y: auto;
+}
+
+.title-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .panel {

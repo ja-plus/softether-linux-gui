@@ -70,10 +70,6 @@
   --toast-radius: 8px;
   --focus-ring: var(--accent-soft);
 
-  /* 左上角标识块：深灰磁贴 */
-  --mark-bg: #2b2b2b;
-  --mark-radius: 8px;
-
   /* 自定义顶栏：Win11 标题栏按钮是通栏全高的方角块 */
   --titlebar-bg: var(--bg);
   --titlebar-fg: var(--text);
@@ -162,9 +158,6 @@
   --toast-radius: 10px;
   --focus-ring: var(--accent-soft);
 
-  --mark-bg: var(--accent);
-  --mark-radius: 10px;
-
   /* Deepin 标题栏按钮是留白的圆角块 */
   --titlebar-bg: var(--bg);
   --titlebar-fg: var(--text);
@@ -250,9 +243,6 @@
   --overlay-blur: blur(4px);
   --toast-radius: 10px;
   --focus-ring: rgba(0, 122, 255, 0.32);
-
-  --mark-bg: linear-gradient(160deg, #4a9cff, #0071e3);
-  --mark-radius: 6px;
 
   /* 标题栏：与侧栏同色、不画分隔线，三个交通灯占最左 */
   --titlebar-bg: var(--side-bg);

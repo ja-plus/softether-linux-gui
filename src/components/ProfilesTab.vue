@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { FolderOpen, Pencil, Plug, PlugZap, Plus, Power, Trash2 } from 'lucide-vue-next'
+import { FolderOpen, Pencil, PlugZap, Plus, Power, Trash2 } from 'lucide-vue-next'
 import AccountDialog from './AccountDialog.vue'
+import DisconnectIcon from './DisconnectIcon.vue'
+import InfoTip from './InfoTip.vue'
 import {
   busy,
   connectAccount,
@@ -62,11 +64,13 @@ onMounted(() => {
   <section class="profiles">
     <header class="head">
       <div>
-        <h1>{{ t('profiles.title') }}</h1>
-        <p class="hint">{{ t('profiles.subtitle') }}</p>
+        <div class="title-line">
+          <h1>{{ t('profiles.title') }}</h1>
+          <InfoTip :text="t('profiles.subtitle')" />
+          <span class="hint">{{ t('profiles.accountsHint', { n: accounts.length }) }}</span>
+        </div>
       </div>
       <div class="row">
-        <span class="hint">{{ t('profiles.accountsHint', { n: accounts.length }) }}</span>
         <button class="primary" :disabled="!!busy" @click="creating = true">
           <Plus :size="14" /> {{ t('profiles.newAccount') }}
         </button>
@@ -115,7 +119,7 @@ onMounted(() => {
               <PlugZap :size="14" /> {{ busy === `connect:${account.name}` ? t('common.connecting') : t('common.connect') }}
             </button>
             <button v-else class="ghost" :disabled="!!busy" @click="disconnectAccount(account.name)">
-              <Plug :size="14" /> {{ t('common.disconnect') }}
+              <DisconnectIcon /> {{ t('common.disconnect') }}
             </button>
             <button class="ghost" :disabled="!!busy" :title="t('common.edit')" @click="openEdit(account.name)">
               <Pencil :size="14" />
@@ -179,6 +183,13 @@ onMounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.title-line {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .banner {

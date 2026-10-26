@@ -12,6 +12,7 @@ import DefaultsSettings from './settings/DefaultsSettings.vue'
 import RoutesSettings from './settings/RoutesSettings.vue'
 import ClientDirSettings from './settings/ClientDirSettings.vue'
 import DiagSettings from './settings/DiagSettings.vue'
+import InfoTip from './InfoTip.vue'
 
 /**
  * 设置页只负责三件事：造草稿、把草稿发给六张卡片、在底部挂保存状态。
@@ -42,8 +43,10 @@ onMounted(async () => {
   <section class="settings">
     <div class="settings-scroll">
       <header>
-        <h1>{{ t('settings.title') }}</h1>
-        <p class="hint">{{ t('settings.subtitle', { dir: configDir }) }}</p>
+        <div class="title-line">
+          <h1>{{ t('settings.title') }}</h1>
+          <InfoTip :text="t('settings.subtitle', { dir: configDir })" />
+        </div>
       </header>
 
       <LanguageSettings />
@@ -83,6 +86,12 @@ onMounted(async () => {
   flex-direction: column;
   overflow: auto;
   gap: 12px;
+}
+
+.title-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 /* 状态栏独立于滚动区，始终固定在设置页底部。 */

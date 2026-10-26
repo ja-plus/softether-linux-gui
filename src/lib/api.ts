@@ -340,7 +340,8 @@ export function isYes(value?: string | null): boolean {
 /** 加密等开关字段可能带后缀（如 “已启用 (算法: TLS)”), 只翻译前缀 */
 export function localizeFlag(value?: string | null): string {
   const text = value ?? ''
-  if (text.startsWith('已启用')) return t('common.enabled') + text.slice(3)
-  if (text.startsWith('已禁用')) return t('common.disabled') + text.slice(3)
+  const localizeSuffix = (suffix: string) => suffix.replace(/算法\s*:/g, `${t('overview.algorithm')}:`)
+  if (text.startsWith('已启用')) return t('common.enabled') + localizeSuffix(text.slice(3))
+  if (text.startsWith('已禁用')) return t('common.disabled') + localizeSuffix(text.slice(3))
   return text
 }

@@ -2,6 +2,7 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Copy, Minus, Square, X } from 'lucide-vue-next'
+import { overview } from '../lib/api'
 import { t } from '../lib/i18n'
 
 const maximized = ref(false)
@@ -47,8 +48,16 @@ function toggleMaximize(event: MouseEvent) {
 
 <template>
   <header class="titlebar" @mousedown="dragStart" @dblclick="toggleMaximize">
-    <span class="mark">SE</span>
-    <span class="title">SoftEther Tray</span>
+    <svg class="mark" viewBox="0 0 256 256" aria-hidden="true">
+      <rect width="256" height="256" rx="58" fill="#2a2a2a" />
+      <path d="M70 96a58 58 0 0 1 116 0" fill="none" stroke="#fff" stroke-width="14" stroke-linecap="round" />
+      <circle cx="128" cy="140" r="26" fill="none" stroke="#fff" stroke-width="14" />
+      <path d="M104 188h48" stroke="#fff" stroke-width="14" stroke-linecap="round" />
+      <circle cx="128" cy="58" r="9" fill="#5dcaa5" />
+    </svg>
+    <span class="title">
+      SoftEther Tray<span v-if="overview"> · <template v-if="overview.snapshot">{{ overview.snapshot.name }} · </template>{{ t(overview.snapshot ? 'status.connected' : 'status.disconnected') }}</span>
+    </span>
     <div class="caption">
       <button class="cap-btn" :aria-label="t('titlebar.minimize')" @click="withWindow((win) => win.minimize())">
         <Minus :size="13" :stroke-width="1.6" />
@@ -81,19 +90,12 @@ function toggleMaximize(event: MouseEvent) {
   cursor: default;
 }
 
+/* 与应用图标同一枚图形，按标题栏尺寸等比缩放 */
 .mark {
   width: 22px;
   height: 22px;
-  border-radius: calc(var(--mark-radius) * 0.7);
-  background: var(--mark-bg);
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 9px;
-  font-weight: 500;
-  letter-spacing: 0.4px;
   flex: none;
+  display: block;
 }
 
 .title {

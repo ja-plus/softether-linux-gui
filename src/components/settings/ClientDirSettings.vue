@@ -294,15 +294,15 @@ onMounted(() => {
 </template>
 
 <style scoped>
-/* 三张卡片横排，窄窗口自动折行；min-width 保证折行后仍是完整卡片 */
+/* 三张来源卡片用响应式网格均分；窄窗口自动减少列数 */
 .sources {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
   gap: 8px;
 }
 
 .source-card {
-  flex: 1 1 200px;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;

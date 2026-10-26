@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { listen } from '@tauri-apps/api/event'
-import { Activity, LayoutList, Layers, LogOut, Settings as SettingsIcon } from 'lucide-vue-next'
+import { Activity, Layers, LayoutList, LogOut, Plug, Settings as SettingsIcon } from 'lucide-vue-next'
 import OverviewTab from './components/OverviewTab.vue'
 import ProfilesTab from './components/ProfilesTab.vue'
 import DiagnosticsTab from './components/DiagnosticsTab.vue'
@@ -42,7 +42,13 @@ async function quit() {
         <nav>
           <button :class="{ active: tab === 'overview' }" @click="tab = 'overview'">
             <LayoutList :size="15" /> {{ t('app.nav.connections') }}
-            <span class="pill" :class="overview?.snapshot ? 'ok' : 'off'">{{ overview?.snapshot ? t('app.badge.connected') : t('app.badge.offline') }}</span>
+            <span class="pill" :class="overview?.snapshot ? 'ok' : 'off'" :aria-label="overview?.snapshot ? t('app.badge.connected') : t('app.badge.offline')">
+              <svg v-if="overview?.snapshot" class="link-state-icon" viewBox="0 0 1024 1024" aria-hidden="true">
+                <path d="M935.754805 89.966493a47.62257 47.62257 0 0 0-3.672102-4.590127A252.170113 252.170113 0 0 0 753.698885 8.893371c-66.384715 1.147532-131.794027 24.72931-180.621505 72.35188l-175.055976 175.572365A248.096375 248.096375 0 0 0 325.956407 437.209615a258.538914 258.538914 0 0 0 76.540371 179.875609c1.204908 1.204908 2.52457 2.295064 3.901608 3.270466a68.163389 68.163389 0 0 0 94.72875-4.475374 68.278142 68.278142 0 0 0-2.409817-95.991035 123.187539 123.187539 0 0 1-36.548887-85.720625 112.22861 112.22861 0 0 1 32.30302-81.302628l174.654339-175.342859c22.72113-21.745728 52.384827-34.425954 83.884575-32.589903a116.93349 116.93349 0 0 1 82.851796 36.835771c22.950636 22.72113 35.917745 53.130722 36.548887 85.778002a110.908948 110.908948 0 0 1-31.384994 80.212472L728.625315 456.717656a67.704376 67.704376 0 0 0-20.885079 47.852076c-0.401636 18.245756 6.368801 35.516109 19.049028 48.655348a68.278142 68.278142 0 0 0 96.507425 1.836051l113.376141-109.417157a248.899647 248.899647 0 0 0 72.064997-180.334622c-1.147532-67.933882-28.401412-131.73665-72.983022-175.342859z" />
+                <path d="M520.864683 400.259091a68.565025 68.565025 0 0 0-1.893427 97.023814c22.950636 22.778506 35.975122 53.245475 36.606264 85.720625a111.88435 111.88435 0 0 1-32.30302 81.302628l-174.424833 175.055976a121.179358 121.179358 0 0 1-170.752732-171.728134l113.605648-119.974449a68.335519 68.335519 0 0 0-2.52457-96.450048 67.589623 67.589623 0 0 0-48.770101-18.647392c-18.188379 0.459013-35.114473 8.032723-47.737323 21.229339l-112.458116 118.769541c-96.679554 100.638539-94.269737 261.924133 5.106516 359.292206a260.661848 260.661848 0 0 0 183.605088 76.827253h1.204908a244.998039 244.998039 0 0 0 174.31008-72.294503l175.342859-175.629741a249.18653 249.18653 0 0 0 72.122374-180.334623 259.227433 259.227433 0 0 0-77.22889-180.449375 68.507648 68.507648 0 0 0-93.810725 0.286883z" />
+              </svg>
+              <Plug v-else :size="14" />
+            </span>
           </button>
           <button :class="{ active: tab === 'profiles' }" @click="tab = 'profiles'">
             <Layers :size="15" /> {{ t('app.nav.profiles') }}
@@ -80,6 +86,12 @@ async function quit() {
   position: relative;
 }
 main {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
   overflow: auto;
 }
 
@@ -149,13 +161,20 @@ nav button.active::before {
 
 .pill {
   margin-left: auto;
-  font-size: 11px;
-  line-height: 16px;
-  border-radius: 999px;
-  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
   border: 0.5px solid transparent;
   flex: none;
-  white-space: nowrap;
+}
+
+.link-state-icon {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
 }
 
 .pill.ok {
@@ -188,16 +207,4 @@ nav button.active::before {
   font-size: 12px;
 }
 
-main {
-  flex: 1 1 auto;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  /* 给页面滚动区留出与标题栏、窗口边缘的呼吸空间。
-     各页自己的 overflow:auto 现在从这里开始，滚动条不会再贴着顶部菜单。 */
-  padding: 12px 12px 12px 0;
-  background: var(--bg);
-}
 </style>

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { RefreshCw, Plug, PlugZap, Power } from 'lucide-vue-next'
+import { RefreshCw, PlugZap, Power } from 'lucide-vue-next'
+import DisconnectIcon from './DisconnectIcon.vue'
 import SelectInput, { type SelectOption } from './SelectInput.vue'
 import Sparkline from './Sparkline.vue'
 import {
@@ -8,7 +9,6 @@ import {
   connectAccount,
   disconnectAccount,
   formatBytes,
-  formatDuration,
   formatRate,
   isYes,
   localizeFlag,
@@ -44,6 +44,14 @@ const elapsed = computed(() => {
   const since = snapshot.value?.connectedSince
   if (!since) return null
   return Math.max(0, now.value / 1000 - since)
+})
+const elapsedClock = computed(() => {
+  if (elapsed.value === null) return null
+  const totalSeconds = Math.floor(elapsed.value)
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  return [hours, minutes, seconds].map((value) => String(value).padStart(2, '0')).join(':')
 })
 
 /** 连接页只负责挑一个配置连上；增删改统一放到「连接配置」页 */
@@ -222,12 +230,23 @@ watch(
 
     <div class="status card" :class="{ connected: !!snapshot }">
       <div class="status-main">
-        <div class="row">
-          <span class="badge" :class="[snapshot ? 'ok' : 'off', { 'disconnected-status': !snapshot }]">
-            <i class="dot" />{{ snapshot ? t('status.connected') : overview?.serviceRunning ? t('status.disconnected') : t('status.serviceDown') }}
-          </span>
-          <span v-if="snapshot" class="strong">{{ snapshot.name }}</span>
-          <div v-else-if="accounts.length" class="picker">
+        <template v-if="snapshot">
+          <div class="status-heading">
+            <strong class="strong">{{ snapshot.name }}</strong>
+            <span class="badge ok"><i class="dot" />{{ t('status.connected') }}</span>
+          </div>
+          <div class="meta">
+            <span>{{ t('overview.server') }} <span class="mono">{{ snapshot.host }}</span></span>
+            <span>{{ t('overview.hub') }} <span class="mono">{{ snapshot.hub || '—' }}</span></span>
+          </div>
+        </template>
+        <template v-else>
+          <div class="status-heading">
+            <span class="badge off">
+              <i class="dot" />{{ overview?.serviceRunning ? t('status.disconnected') : t('status.serviceDown') }}
+            </span>
+          </div>
+          <div v-if="accounts.length" class="picker">
             <SelectInput
               v-model="selectedName"
               :options="accountOptions"
@@ -235,32 +254,19 @@ watch(
             />
           </div>
           <span v-else class="muted">{{ t('overview.noAccounts') }}</span>
-        </div>
-        <div class="meta">
-          <span v-if="snapshot">{{ t('overview.server') }} <span class="mono">{{ snapshot.host }}</span></span>
-          <span v-if="snapshot">{{ t('overview.hub') }} <span class="mono">{{ snapshot.hub || '—' }}</span></span>
-          <span v-if="overview?.iface">
-            {{ t('overview.interface') }} <span class="mono">{{ overview.iface }} · {{ overview.ifaceIpv4 ?? t('common.noIpv4') }} · MTU {{ overview.ifaceMtu ?? '—' }}</span>
-          </span>
-          <span v-if="elapsed !== null">{{ t('overview.connectedFor', { duration: formatDuration(elapsed) }) }}</span>
-        </div>
-        <div v-if="snapshot" class="flags">
-          <span class="badge" :class="isYes(snapshot.udpAccel) ? 'warn' : 'off'">
-            {{ t('overview.udpAccel') }} {{ isYes(snapshot.udpAccel) ? t('overview.active') : t('overview.inactive') }}
-          </span>
-          <span class="badge off">{{ t('overview.tcpConnections', { n: snapshot.tcpConnections || '—' }) }}</span>
-          <span class="badge off">{{ localizeFlag(snapshot.encrypted) || t('overview.encryptionUnknown') }}</span>
-        </div>
+        </template>
       </div>
 
       <div class="status-actions">
         <button
           v-if="snapshot"
           class="connection-action disconnect-action"
+          :class="{ 'showing-duration': elapsedClock !== null && busy !== `disconnect:${snapshot.name}` }"
           :disabled="!!busy"
           @click="disconnectAccount(snapshot.name)"
         >
-          <Plug :size="34" />
+          <DisconnectIcon class="disconnect-icon" />
+          <span v-if="elapsedClock !== null" class="action-duration">{{ elapsedClock }}</span>
           <span class="action-label">{{ busy === `disconnect:${snapshot.name}` ? t('common.disconnecting') : t('common.disconnect') }}</span>
         </button>
         <button
@@ -269,7 +275,10 @@ watch(
           :disabled="!!busy || !overview?.serviceRunning || !selectedName"
           @click="connectAccount(selectedName)"
         >
-          <PlugZap :size="34" />
+          <svg class="connect-icon" viewBox="0 0 1024 1024" width="34" height="34" fill="currentColor" aria-hidden="true">
+            <path d="M935.754805 89.966493a47.62257 47.62257 0 0 0-3.672102-4.590127A252.170113 252.170113 0 0 0 753.698885 8.893371c-66.384715 1.147532-131.794027 24.72931-180.621505 72.35188l-175.055976 175.572365A248.096375 248.096375 0 0 0 325.956407 437.209615a258.538914 258.538914 0 0 0 76.540371 179.875609c1.204908 1.204908 2.52457 2.295064 3.901608 3.270466a68.163389 68.163389 0 0 0 94.72875-4.475374 68.278142 68.278142 0 0 0-2.409817-95.991035 123.187539 123.187539 0 0 1-36.548887-85.720625 112.22861 112.22861 0 0 1 32.30302-81.302628l174.654339-175.342859c22.72113-21.745728 52.384827-34.425954 83.884575-32.589903a116.93349 116.93349 0 0 1 82.851796 36.835771c22.950636 22.72113 35.917745 53.130722 36.548887 85.778002a110.908948 110.908948 0 0 1-31.384994 80.212472L728.625315 456.717656a67.704376 67.704376 0 0 0-20.885079 47.852076c-0.401636 18.245756 6.368801 35.516109 19.049028 48.655348a68.278142 68.278142 0 0 0 96.507425 1.836051l113.376141-109.417157a248.899647 248.899647 0 0 0 72.064997-180.334622c-1.147532-67.933882-28.401412-131.73665-72.983022-175.342859z" />
+            <path d="M520.864683 400.259091a68.565025 68.565025 0 0 0-1.893427 97.023814c22.950636 22.778506 35.975122 53.245475 36.606264 85.720625a111.88435 111.88435 0 0 1-32.30302 81.302628l-174.424833 175.055976a121.179358 121.179358 0 0 1-170.752732-171.728134l113.605648-119.974449a68.335519 68.335519 0 0 0-2.52457-96.450048 67.589623 67.589623 0 0 0-48.770101-18.647392c-18.188379 0.459013-35.114473 8.032723-47.737323 21.229339l-112.458116 118.769541c-96.679554 100.638539-94.269737 261.924133 5.106516 359.292206a260.661848 260.661848 0 0 0 183.605088 76.827253h1.204908a244.998039 244.998039 0 0 0 174.31008-72.294503l175.342859-175.629741a249.18653 249.18653 0 0 0 72.122374-180.334623 259.227433 259.227433 0 0 0-77.22889-180.449375 68.507648 68.507648 0 0 0-93.810725 0.286883z" />
+          </svg>
           <span class="action-label">{{ busy === `connect:${selectedName}` ? t('common.connecting') : t('common.connect') }}</span>
         </button>
       </div>
@@ -281,15 +290,19 @@ watch(
 
     <div class="grid">
       <div class="card metric">
-        <span class="label">{{ t('overview.download') }}</span>
+        <div class="metric-heading">
+          <span class="label">{{ t('overview.download') }}</span>
+          <span class="hint">{{ t('overview.cumulative', { size: formatBytes(snapshot?.rxBytes ?? 0), packets: (snapshot?.rxPackets ?? 0).toLocaleString() }) }}</span>
+        </div>
         <strong class="value">{{ formatRate(currentRate.rx) }}</strong>
-        <span class="hint">{{ t('overview.cumulative', { size: formatBytes(snapshot?.rxBytes ?? 0), packets: (snapshot?.rxPackets ?? 0).toLocaleString() }) }}</span>
         <Sparkline :values="rates.map((item) => item.rx)" tone="accent" />
       </div>
       <div class="card metric">
-        <span class="label">{{ t('overview.upload') }}</span>
+        <div class="metric-heading">
+          <span class="label">{{ t('overview.upload') }}</span>
+          <span class="hint">{{ t('overview.cumulative', { size: formatBytes(snapshot?.txBytes ?? 0), packets: (snapshot?.txPackets ?? 0).toLocaleString() }) }}</span>
+        </div>
         <strong class="value">{{ formatRate(currentRate.tx) }}</strong>
-        <span class="hint">{{ t('overview.cumulative', { size: formatBytes(snapshot?.txBytes ?? 0), packets: (snapshot?.txPackets ?? 0).toLocaleString() }) }}</span>
         <Sparkline :values="rates.map((item) => item.tx)" tone="ok" />
       </div>
       <div class="card metric">
@@ -301,6 +314,21 @@ watch(
           <li v-if="(overview?.routes?.length ?? 0) > 4" class="hint">…</li>
         </ul>
       </div>
+      <div v-if="snapshot" class="connection-panel card">
+        <span class="connection-panel-title">{{ t('overview.attributes') }}</span>
+        <div class="meta">
+          <span v-if="overview?.iface">
+            {{ t('overview.interface') }} <span class="mono">{{ overview.iface }} · {{ overview.ifaceIpv4 ?? t('common.noIpv4') }} · MTU {{ overview.ifaceMtu ?? '—' }}</span>
+          </span>
+        </div>
+        <div class="flags">
+          <span class="badge" :class="isYes(snapshot.udpAccel) ? 'warn' : 'off'">
+            {{ t('overview.udpAccel') }} {{ isYes(snapshot.udpAccel) ? t('overview.active') : t('overview.inactive') }}
+          </span>
+          <span class="badge off">{{ t('overview.tcpConnections', { n: snapshot.tcpConnections || '—' }) }}</span>
+          <span class="badge off">{{ localizeFlag(snapshot.encrypted) || t('overview.encryptionUnknown') }}</span>
+        </div>
+      </div>
     </div>
   </section>
 </template>
@@ -311,9 +339,10 @@ watch(
   display: flex;
   flex-direction: column;
   gap: 12px;
-  height: 100%;
-  /* 作为 flex 子项必须允许收缩到内容以下，否则 height:100% 撑破容器、标题被裁 */
+  flex: 1 1 auto;
+  /* 作为 flex 子项允许收缩，超出窗口的内容由本页滚动查看 */
   min-height: 0;
+  overflow-y: auto;
 }
 
 .spin {
@@ -373,20 +402,17 @@ watch(
   color: var(--text-soft);
 }
 
+/* 状态卡是连接页的主视觉，但只占一行高度：
+   左侧圆形操作按钮，右侧连接信息，指标卡不用滚动就能露出来 */
 .status.card {
-  position: relative;
   display: flex;
-  flex: 0 1 260px;
-  flex-direction: column;
+  flex: 0 0 auto;
+  flex-direction: row;
   align-items: center;
-  justify-content: center;
-  gap: 18px;
-  padding: 30px 22px 24px;
-  min-height: 220px;
-  max-height: 260px;
+  gap: 22px;
+  padding: 18px 24px;
   border: 0;
   background: linear-gradient(180deg, var(--panel) 0%, var(--panel-muted) 100%);
-  text-align: center;
 }
 
 .status.connected {
@@ -396,38 +422,30 @@ watch(
 .status-main {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 10px;
+  align-items: flex-start;
+  gap: 6px;
   order: 2;
-  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
-.status-main > .row {
-  justify-content: center;
+.status-heading {
+  display: flex;
+  align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 10px;
+  min-width: 0;
 }
 
-.status-main > .row .strong,
-.status-main > .row .muted {
+.status-heading .strong {
   font-size: 20px;
   color: var(--text);
-}
-
-.status-main > .row .badge {
-  order: 2;
-}
-
-.status-main > .row .disconnected-status {
-  position: absolute;
-  top: 22px;
-  left: 22px;
-  order: 0;
+  overflow-wrap: anywhere;
 }
 
 .connection-action {
-  width: 120px;
-  height: 120px;
+  width: 112px;
+  height: 112px;
   border: 0;
   border-radius: 50%;
   display: flex;
@@ -440,6 +458,11 @@ watch(
   box-shadow: 0 10px 28px color-mix(in srgb, var(--accent) 24%, transparent);
   transition: transform 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
   order: 1;
+}
+
+.disconnect-icon {
+  width: 34px;
+  height: 34px;
 }
 
 .connection-action:hover:not(:disabled) {
@@ -456,6 +479,34 @@ watch(
   font-weight: 500;
 }
 
+.action-duration {
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.disconnect-action.showing-duration .action-label {
+  display: none;
+}
+
+.disconnect-action:not(.showing-duration) .action-duration {
+  display: none;
+}
+
+.disconnect-action.showing-duration:hover .action-duration,
+.disconnect-action.showing-duration:focus-visible .action-duration {
+  display: none;
+}
+
+.disconnect-action.showing-duration:hover .action-label,
+.disconnect-action.showing-duration:focus-visible .action-label {
+  display: inline;
+}
+
+.connect-icon {
+  display: block;
+}
+
 .strong {
   font-weight: 500;
 }
@@ -466,6 +517,19 @@ watch(
   gap: 4px 16px;
   color: var(--text-soft);
   font-size: 12px;
+}
+
+.connection-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 14px;
+}
+
+.connection-panel-title {
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 400;
 }
 
 .flags {
@@ -481,6 +545,7 @@ watch(
   justify-content: center;
   order: 1;
   gap: 12px;
+  flex: none;
 }
 
 .status-actions button {
@@ -494,15 +559,14 @@ watch(
 }
 
 .grid {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
-  flex-wrap: wrap;
   /* 指标行不参与纵向收缩：否则窗口不够高时卡片被压扁而不出现滚动 */
   flex: 0 0 auto;
 }
 
 .metric {
-  flex: 1 1 180px;
   min-width: 0;
   padding: 12px 14px;
   display: flex;
@@ -513,6 +577,23 @@ watch(
 .metric .label {
   color: var(--text-soft);
   font-size: 12px;
+}
+
+.metric-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.metric-heading .hint {
+  text-align: right;
+  white-space: nowrap;
+  flex: none;
+}
+
+.metric-heading .label {
+  white-space: nowrap;
 }
 
 .metric .value {
@@ -527,5 +608,11 @@ watch(
   padding: 0;
   color: var(--text-soft);
   font-size: 11px;
+}
+
+@media (max-width: 480px) {
+  .grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 </style>

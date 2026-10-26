@@ -36,7 +36,7 @@ const area = computed(() => {
 <template>
   <svg
     :viewBox="`0 0 ${WIDTH} ${HEIGHT}`"
-    preserveAspectRatio="none"
+    preserveAspectRatio="xMidYMax meet"
     class="spark"
     :class="tone ?? 'accent'"
     role="img"
@@ -60,7 +60,9 @@ const area = computed(() => {
 <style scoped>
 .spark {
   width: 100%;
-  height: 34px;
+  height: auto;
+  min-height: 34px;
+  flex: 1 1 34px;
   display: block;
   margin-top: 4px;
 }

@@ -63,15 +63,15 @@ watch(
 </template>
 
 <style scoped>
-/* 三张风格卡片等宽均分；窄窗口按 auto-fit 折成两行，不再靠固定宽度硬撑 */
+/* 三张风格卡片用响应式网格均分；窄窗口自动换列 */
 .styles {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(196px, 100%), 1fr));
   gap: 12px;
 }
 
 .style-card {
-  flex: 1 1 196px;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
