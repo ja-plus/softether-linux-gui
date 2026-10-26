@@ -475,6 +475,78 @@ input:focus {
   align-items: center;
 }
 
+/* ── 设置页卡片的通用骨架 ────────────────────────────────────────────
+   这几条被六张设置卡片共用。放在全局而不是某个组件的 scoped 里：
+   scoped 样式不会作用到子组件内部，拆卡后各卡片会一起掉样式。 */
+
+/* 卡片内边距 + 纵向堆叠：.card 只管外观，.block 管排布 */
+.block {
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.row-between {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.row.wrap {
+  flex-wrap: wrap;
+  gap: 12px 18px;
+}
+
+/* 勾选行的文字用软色：它比标签弱、比 hint 强，一屏几十个开关时层次靠它撑 */
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-soft);
+  min-height: 32px;
+}
+
+/* 单选圆点：语言卡与客户端来源卡共用 */
+.radio {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 1.5px solid var(--line-strong);
+  color: #fff;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.radio.on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* 行内错误提示：设置页每张卡片各自可能报错，样式只留一份 */
+.error {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border: 0.5px solid var(--danger-line);
+  border-radius: var(--radius-ctl);
+  padding: 8px 10px;
+  margin: 0;
+  font-size: 12px;
+}
+
+/* 卡片里带图标的按钮统一成一行、居中、6px 间距 */
+.block .row button,
+.row-between button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
