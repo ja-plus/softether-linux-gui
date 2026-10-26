@@ -211,16 +211,34 @@ async function addNic() {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  overflow: auto;
+  flex: 1;
+  height:0;
+  padding: 0 20px;
+}
+.foot {
+  padding: 0 20px;
 }
 
 .two {
-  display: grid;
-  grid-template-columns: 1fr 120px;
+  display: flex;
   gap: 10px;
 }
 
+.two:first-child > .field:first-child {
+  flex: 1 1 auto;
+}
+
+.two:first-child > .field:last-child {
+  flex: 0 0 120px;
+}
+
 .two + .two {
-  grid-template-columns: 1fr 1fr;
+  display: flex;
+}
+
+.two + .two > .field {
+  flex: 1 1 0;
 }
 
 .switches {

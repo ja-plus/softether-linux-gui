@@ -1,7 +1,7 @@
 /*
- * 界面风格由 <html data-style="win11|deepin"> 切换（见 lib/api.ts 的 applyUiStyle）。
- * :root 即 Win11 风格：JS 还没跑起来时也不会裸奔；deepin 只覆盖取值，
- * 组件样式全部吃变量，结构差异（导航指示条/标签形状）也由变量控制。
+ * 界面风格由 <html data-style="win11|deepin|mac"> 切换（见 lib/api.ts 的 applyUiStyle）。
+ * :root 即 Win11 风格：JS 还没跑起来时也不会裸奔；另外两套只覆盖取值，
+ * 组件样式全部吃变量，结构差异（导航指示条/标签形状/交通灯位置）也由变量控制。
  */
 :root {
   /* Win11：Segoe 优先，Linux 上回退到系统 CJK 字体 */
@@ -35,6 +35,9 @@
   --danger-line: #f7c1c1;
   --off-bg: #f0f0f0;
   --off-line: #d0d0d0;
+
+  /* 侧栏底色：Win11 / Deepin 下与内容面同色，macOS 下压深一档 */
+  --side-bg: var(--panel);
 
   /* Fluent：控件方角（4px）、卡片 8px */
   --radius: 8px;
@@ -80,10 +83,21 @@
   --caption-h: 100%;
   --caption-gap: 0px;
   --caption-radius: 0px;
-  --caption-hover-bg: #dedede;
   --caption-hover-fg: var(--text);
-  --caption-close-bg: #c42b1c;
   --caption-close-fg: #ffffff;
+  /* 窗口按钮底色/悬停色：Win11 与 Deepin 平时透明、悬停出色块，macOS 平时就是三颗圆点。
+     组件只读这些变量，风格差异不落到组件里。 */
+  --caption-dot-min: transparent;
+  --caption-dot-min-hover: #dedede;
+  --caption-dot-max: transparent;
+  --caption-dot-max-hover: #dedede;
+  --caption-dot-close: transparent;
+  --caption-dot-close-hover: #c42b1c;
+  /* 以下四项只服务 macOS 的交通灯布局：其余风格靠右、无边框、图标原尺寸 */
+  --caption-order: 0;
+  --caption-margin: auto 0 auto auto;
+  --caption-border: 0.5px solid transparent;
+  --caption-icon-scale: 1;
 }
 
 :root[data-style="deepin"] {
@@ -160,20 +174,141 @@
   --caption-h: 28px;
   --caption-gap: 5px;
   --caption-radius: 8px;
-  --caption-hover-bg: #dfe4ec;
   --caption-hover-fg: var(--text);
-  --caption-close-bg: #e05a4d;
   --caption-close-fg: #ffffff;
+  --caption-dot-min-hover: #dfe4ec;
+  --caption-dot-max-hover: #dfe4ec;
+  --caption-dot-close-hover: #e05a4d;
+}
+
+/*
+ * macOS（Sequoia 系统设置的观感）。与前两套的差别不只是配色：
+ * 交通灯挪到左上、侧栏压深一档、选中项是蓝色圆角实心（不是胶囊也不是左侧指示条）、
+ * 卡片几乎不投影。这些结构性差异全部走下面的变量，组件里没有风格分支。
+ */
+:root[data-style="mac"] {
+  /* macOS：SF Pro 优先；Linux 上没有 SF，直接落到 Noto Sans CJK */
+  --font: "SF Pro Text", -apple-system, BlinkMacSystemFont, "Helvetica Neue", "PingFang SC", "Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", sans-serif;
+
+  /* 浅灰窗口底 + 纯白内容面 + 压深一档的侧栏 */
+  --bg: #f5f5f7;
+  --panel: #ffffff;
+  --panel-muted: #f5f5f7;
+  --side-bg: #ecedf0;
+  --line: #e5e5ea;
+  --line-strong: #d1d1d6;
+  --text: #1d1d1f;
+  --text-soft: #5e5e63;
+  --text-hint: #8a8a8e;
+
+  /* 系统强调蓝（macOS 控件色，比 Win11 蓝更亮、更饱和） */
+  --accent: #007aff;
+  --accent-hover: #0069db;
+  --accent-soft: #e8f1fe;
+  --accent-line: #b6d5fb;
+  --accent-ink: #0a58c2;
+
+  --ok: #1d7f4e;
+  --ok-soft: #e6f5ec;
+  --ok-line: #a5dcc0;
+  --warn: #8a5a00;
+  --warn-soft: #fdf1da;
+  --warn-line: #f6cd84;
+  --danger: #c0342b;
+  --danger-soft: #fdeceb;
+  --danger-line: #f5bdb8;
+  --off-bg: #ececef;
+  --off-line: #d1d1d6;
+
+  /* 控件 6px、卡片 10px：macOS 的圆角比 Fluent 大、比 DDE 小 */
+  --radius: 10px;
+  --radius-ctl: 6px;
+
+  /* 卡片靠极淡的一层描影浮起来，浮层才给明显阴影 */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-dialog: 0 20px 50px rgba(0, 0, 0, 0.22);
+  --shadow-pop: 0 10px 28px rgba(0, 0, 0, 0.14);
+  --shadow-btn: none;
+
+  /* 侧栏选中：蓝色圆角实心，无左侧指示条 */
+  --nav-active-bg: var(--accent);
+  --nav-active-fg: #ffffff;
+  --nav-indicator: transparent;
+  --nav-indicator-w: 0px;
+
+  /* 标签页：浅灰圆角底（分段控件观感），不画下划线 */
+  --tab-active-bg: #ececef;
+  --tab-active-fg: var(--text);
+  --tab-indicator: 2px solid transparent;
+  --tab-radius: 6px;
+
+  --ghost-hover-bg: #f2f2f5;
+  --ghost-hover-border: #c7c7cc;
+  --ghost-hover-fg: var(--text);
+
+  --overlay-bg: rgba(0, 0, 0, 0.28);
+  --overlay-blur: blur(4px);
+  --toast-radius: 10px;
+  --focus-ring: rgba(0, 122, 255, 0.32);
+
+  --mark-bg: linear-gradient(160deg, #4a9cff, #0071e3);
+  --mark-radius: 6px;
+
+  /* 标题栏：与侧栏同色、不画分隔线，三个交通灯占最左 */
+  --titlebar-bg: var(--side-bg);
+  --titlebar-fg: var(--text);
+  --titlebar-border: transparent;
+  --caption-fg: transparent;
+  --caption-w: 12px;
+  --caption-h: 12px;
+  --caption-gap: 8px;
+  --caption-radius: 999px;
+  --caption-hover-fg: rgba(0, 0, 0, 0.55);
+  --caption-close-fg: rgba(0, 0, 0, 0.6);
+  --caption-order: -1;
+  --caption-margin: 0;
+  --caption-border: 0.5px solid rgba(0, 0, 0, 0.12);
+  --caption-icon-scale: 0.62;
+  /* 交通灯：平时就是红黄绿，悬停保持本色，只让符号浮现 */
+  --caption-dot-min: #ff5f57;
+  --caption-dot-min-hover: #ff5f57;
+  --caption-dot-max: #febc2e;
+  --caption-dot-max-hover: #febc2e;
+  --caption-dot-close: #28c840;
+  --caption-dot-close-hover: #28c840;
+}
+
+/* macOS 的滚动条是细、半透明、悬停才显形的浮层条；沿用系统默认的宽灰条会很出戏 */
+:root[data-style="mac"] ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+:root[data-style="mac"] ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+:root[data-style="mac"] ::-webkit-scrollbar-thumb {
+  /* 透明边框 + content-box 裁切：留出轨道间隙，thumb 才不会顶满整条 */
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.22);
+  background-clip: content-box;
+}
+
+:root[data-style="mac"] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.38);
+  background-clip: content-box;
 }
 
 * {
   box-sizing: border-box;
 }
-
 html,
 body,
 #app {
   height: 100%;
+  min-height: 340px;
   margin: 0;
 }
 
@@ -424,15 +559,17 @@ input:focus {
   width: 100%;
   max-width: 520px;
   max-height: 100%;
-  overflow: auto;
-  padding: 20px;
+  padding: 10px 0px;
+  display: flex;
+  flex-direction: column;
 }
 
 .dialog header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 14px;
+  margin-bottom: 6px;
+  padding: 0 20px;
 }
 
 .toast {

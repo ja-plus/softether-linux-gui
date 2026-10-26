@@ -1,6 +1,6 @@
 # SoftEther Tray
 
-[English](README.md) | **简体中文** · [详细使用说明](docs/usage.md)
+[English](README.md) | **简体中文** · [详细使用说明](docs/usage.zh-CN.md)
 
 一个挂在 Linux 系统托盘的 SoftEther VPN 客户端。官方只提供 Windows 的 Client Manager，Linux 版只有 `vpncmd`，这个应用就是给它补上一层 GUI。
 
@@ -12,7 +12,7 @@
 - 状态面板：隧道 IP、服务器、HUB、MTU、累计流量、上下行速率曲线
 - 网络诊断：对任意内网目标做丢包 / 延迟检测
 - 连接变化发桌面通知；可选开机自启动与自动连接
-- 界面风格切换：Windows 11（Fluent）与 Deepin 25 两套外观，设置页即时预览
+- 界面风格切换：Windows 11（Fluent）、Deepin 25、macOS 三套外观，设置页即时预览
 - 中英文界面切换：可在设置页随时切换；首次启动按系统语言自动选择（中国大陆用中文，其余地区用英文）
 - 客户端目录可选：内置、自动扫描到的目录，或自己指定路径
 - 自定义顶栏（不用系统标题栏）：拖拽移动、双击最大化、边缘拉伸；关闭按钮仍只隐藏到托盘

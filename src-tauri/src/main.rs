@@ -480,7 +480,7 @@ fn do_disconnect(app: &AppHandle, name: &str) -> Result<Overview, String> {
     // 注意这里读的是断开**之后**的状态：断之前网卡上必然有路由和地址，
     // 拿那个去判断等于永远要提权。
     if let Some(iface) = vpn::read_overview_fresh(&settings).iface {
-        if settings::needs_disconnect_cleanup(&iface) {
+        if settings::needs_disconnect_cleanup(&iface, settings.routes.dhcp) {
             // 与连接一致：装了 helper 就走 helper（静默），否则退回内联脚本
             let result = if settings::privileged_helper().is_some() {
                 let nets = settings.routes.subnets.join(",");
@@ -769,6 +769,17 @@ async fn run_diagnostics(target: String, count: u32) -> Result<DiagResult, Strin
         })?
 }
 
+/// 诊断页「没填目标」时用的默认地址：当前隧道网段的第一跳。
+///
+/// 由当前网络状态算出来，而不是把某个内网地址写死在配置里——每个人的内网都不一样，
+/// 写死的地址在别人机器上要么不存在、要么是别人的服务。没有隧道时返回 null，
+/// 前端就退回到让用户自己填。
+#[tauri::command]
+async fn diag_default_target(app: AppHandle) -> Result<Option<String>, String> {
+    let overview = current_overview(&app);
+    Ok(overview.iface.as_deref().and_then(settings::interface_gateway))
+}
+
 /// 单个网段的验证结果。
 ///
 /// 三种状态对应三种不同的失败原因，用户看到的提示要能区分：
@@ -982,6 +993,30 @@ fn open_softether_site() -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_config_dir() -> Result<String, String> {
+    let dir = settings::config_dir();
+    // 配置目录只在第一次保存设置时才建，全新安装时 xdg-open 会打不开不存在的路径
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        if softether_tray_lib::i18n::is_en() {
+            format!("Cannot create config directory {}: {e}", dir.display())
+        } else {
+            format!("无法创建配置目录 {}: {e}", dir.display())
+        }
+    })?;
+    std::process::Command::new("xdg-open")
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| {
+            if softether_tray_lib::i18n::is_en() {
+                format!("Cannot open {}: {e}", dir.display())
+            } else {
+                format!("无法打开 {}: {e}", dir.display())
+            }
+        })?;
+    Ok(dir.display().to_string())
+}
+
+#[tauri::command]
 async fn quit_app(app: AppHandle) -> Result<(), String> {
     shutdown_client(&app);
     app.exit(0);
@@ -1020,11 +1055,13 @@ fn main() {
             delete_account,
             create_nic,
             run_diagnostics,
+            diag_default_target,
             verify_routes,
             set_autostart,
             autostart_enabled,
             env_info,
             config_dir_path,
+            open_config_dir,
             list_client_candidates,
             validate_client_dir,
             open_softether_site,

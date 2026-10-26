@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { invoke } from '@tauri-apps/api/core'
-import { RefreshCw, Plug, PlugZap, Power, Pencil, Plus, Trash2, FolderOpen } from 'lucide-vue-next'
-import AccountDialog from './AccountDialog.vue'
+import { RefreshCw, Plug, PlugZap, Power } from 'lucide-vue-next'
+import SelectInput, { type SelectOption } from './SelectInput.vue'
 import Sparkline from './Sparkline.vue'
 import {
   busy,
@@ -11,18 +10,13 @@ import {
   formatBytes,
   formatDuration,
   formatRate,
-  isAccountConnected,
   isYes,
   localizeFlag,
-  localizeStatus,
   overview,
   refresh,
-  run,
   settings,
-  showToast,
   startService,
   stopService,
-  toast,
 } from '../lib/api'
 import { t, locale } from '../lib/i18n'
 
@@ -34,9 +28,6 @@ interface RateSample {
 const rates = ref<RateSample[]>([])
 const errorText = ref('')
 const now = ref(Date.now())
-const editing = ref<string | null>(null)
-const creating = ref(false)
-const deleting = ref<string | null>(null)
 /** 手动刷新的忙碌态，与轮询、与操作类 busy 都分开 */
 const refreshing = ref(false)
 
@@ -55,15 +46,38 @@ const elapsed = computed(() => {
   return Math.max(0, now.value / 1000 - since)
 })
 
-const selected = computed(() => {
-  if (!snapshot.value) return null
-  return accounts.value.find((account) => account.name === snapshot.value?.name) ?? null
-})
+/** 连接页只负责挑一个配置连上；增删改统一放到「连接配置」页 */
+const selectedName = ref('')
 
-/** 账户是否处于已连接状态：中英文输出都认，且 status 可能缺失 */
-function isConnected(account: { status?: string | null }): boolean {
-  return isAccountConnected(account.status)
-}
+const accountOptions = computed<SelectOption<string>[]>(() =>
+  accounts.value.map((account) => ({
+    label: account.name,
+    value: account.name,
+    hint: `${account.host}:${account.port ?? 443}`,
+    tag: settings.value?.activeAccount === account.name ? t('profiles.default') : undefined,
+  })),
+)
+
+// 默认选中设置里的默认配置，否则第一条；配置列表变化后兜住已失效的名字
+watch(
+  [accounts, () => settings.value?.activeAccount],
+  () => {
+    if (accounts.value.some((account) => account.name === selectedName.value)) return
+    const preferred = settings.value?.activeAccount
+    selectedName.value = accounts.value.some((account) => account.name === preferred)
+      ? (preferred as string)
+      : (accounts.value[0]?.name ?? '')
+  },
+  { immediate: true },
+)
+
+// 断开后让选择器停在刚断开的那条，方便立刻重连
+watch(
+  () => snapshot.value?.name,
+  (name) => {
+    if (name) selectedName.value = name
+  },
+)
 
 /** 后端返回多条路由告警，分隔符也要跟随语言 */
 function joinWarnings(list: string[]): string {
@@ -105,10 +119,6 @@ async function tick() {
   recordRate()
 }
 
-async function openEdit(name: string) {
-  editing.value = name
-}
-
 /** 手动刷新：只锁自己这一个按钮，不牵动其他按钮 */
 async function manualRefresh() {
   if (refreshing.value) return
@@ -118,20 +128,6 @@ async function manualRefresh() {
   } finally {
     refreshing.value = false
   }
-}
-
-async function confirmDelete(name: string) {
-  deleting.value = name
-}
-
-async function doDelete(name: string) {
-  const ok = await run(`delete:${name}`, () => invoke('delete_account', { name }))
-  deleting.value = null
-  if (ok !== null) showToast(t('overview.deleted', { name }))
-}
-
-async function revealConfig() {
-  showToast(t('overview.configDir', { path: await invoke<string>('config_dir_path') }))
 }
 
 /**
@@ -185,16 +181,25 @@ watch(
     <header class="head">
       <div>
         <h1>{{ t('overview.title') }}</h1>
-        <p class="hint">
-          {{ t('overview.subtitle') }}
-        </p>
       </div>
       <div class="row">
-        <button class="ghost" :disabled="refreshing" @click="manualRefresh">
-          <RefreshCw :size="14" :class="{ spin: refreshing }" /> {{ t('overview.refresh') }}
+        <button
+          v-if="!snapshot && overview?.serviceRunning"
+          class="ghost"
+          :disabled="!!busy"
+          :title="t('overview.stopTooltip')"
+          @click="stopService()"
+        >
+          <Power :size="14" /> {{ t('overview.stopService') }}
         </button>
-        <button class="primary" :disabled="!!busy" @click="creating = true">
-          <Plus :size="14" /> {{ t('overview.newAccount') }}
+        <button
+          class="ghost refresh-icon"
+          :disabled="refreshing"
+          :aria-label="t('overview.refresh')"
+          :title="t('overview.refresh')"
+          @click="manualRefresh"
+        >
+          <RefreshCw :size="16" :class="{ spin: refreshing }" />
         </button>
       </div>
     </header>
@@ -218,11 +223,18 @@ watch(
     <div class="status card" :class="{ connected: !!snapshot }">
       <div class="status-main">
         <div class="row">
-          <span class="badge" :class="snapshot ? 'ok' : 'off'">
+          <span class="badge" :class="[snapshot ? 'ok' : 'off', { 'disconnected-status': !snapshot }]">
             <i class="dot" />{{ snapshot ? t('status.connected') : overview?.serviceRunning ? t('status.disconnected') : t('status.serviceDown') }}
           </span>
           <span v-if="snapshot" class="strong">{{ snapshot.name }}</span>
-          <span v-else class="muted">{{ t('overview.chooseAccount') }}</span>
+          <div v-else-if="accounts.length" class="picker">
+            <SelectInput
+              v-model="selectedName"
+              :options="accountOptions"
+              :disabled="!overview?.serviceRunning"
+            />
+          </div>
+          <span v-else class="muted">{{ t('overview.noAccounts') }}</span>
         </div>
         <div class="meta">
           <span v-if="snapshot">{{ t('overview.server') }} <span class="mono">{{ snapshot.host }}</span></span>
@@ -244,28 +256,21 @@ watch(
       <div class="status-actions">
         <button
           v-if="snapshot"
-          class="danger"
+          class="connection-action disconnect-action"
           :disabled="!!busy"
           @click="disconnectAccount(snapshot.name)"
         >
-          <Plug :size="14" /> {{ busy === `disconnect:${snapshot.name}` ? t('common.disconnecting') : t('common.disconnect') }}
+          <Plug :size="34" />
+          <span class="action-label">{{ busy === `disconnect:${snapshot.name}` ? t('common.disconnecting') : t('common.disconnect') }}</span>
         </button>
         <button
           v-else-if="accounts.length"
-          class="primary"
-          :disabled="!!busy || !overview?.serviceRunning"
-          @click="connectAccount(settings?.activeAccount || accounts[0].name)"
+          class="connection-action connect-action"
+          :disabled="!!busy || !overview?.serviceRunning || !selectedName"
+          @click="connectAccount(selectedName)"
         >
-          <PlugZap :size="14" /> {{ t('common.connect') }} {{ settings?.activeAccount || accounts[0].name }}
-        </button>
-        <button
-          v-if="!snapshot && overview?.serviceRunning"
-          class="ghost"
-          :disabled="!!busy"
-          :title="t('overview.stopTooltip')"
-          @click="stopService()"
-        >
-          <Power :size="14" /> {{ t('overview.stopService') }}
+          <PlugZap :size="34" />
+          <span class="action-label">{{ busy === `connect:${selectedName}` ? t('common.connecting') : t('common.connect') }}</span>
         </button>
       </div>
     </div>
@@ -297,77 +302,6 @@ watch(
         </ul>
       </div>
     </div>
-
-    <div class="card list">
-      <header class="list-head">
-        <h2>{{ t('overview.accountsTitle') }}</h2>
-        <span class="hint">{{ t('overview.accountsHint', { n: accounts.length }) }}</span>
-      </header>
-      <div v-if="!accounts.length" class="empty">
-        <p class="muted">{{ t('overview.noAccounts') }}</p>
-        <button class="primary" @click="creating = true"><Plus :size="14" /> {{ t('overview.createFirst') }}</button>
-      </div>
-      <ul>
-        <li v-for="account in accounts" :key="account.name" :class="{ active: snapshot?.name === account.name }">
-          <div class="acct">
-            <div class="row">
-              <span class="badge" :class="isConnected(account) ? 'ok' : 'off'">
-                <i class="dot" />{{ localizeStatus(account.status) }}
-              </span>
-              <span class="strong">{{ account.name }}</span>
-              <span v-if="settings?.activeAccount === account.name" class="badge off">{{ t('overview.default') }}</span>
-            </div>
-            <div class="meta">
-              <span class="mono">{{ account.host }}:{{ account.port ?? 443 }}</span>
-              <span>{{ t('overview.hub') }} <span class="mono">{{ account.hub || '—' }}</span></span>
-              <span>{{ t('overview.interface') }} <span class="mono">{{ account.nic || '—' }}</span></span>
-            </div>
-          </div>
-          <div class="row actions">
-            <button
-              v-if="!isConnected(account)"
-              class="ghost"
-              :disabled="!!busy || !overview?.serviceRunning"
-              @click="connectAccount(account.name)"
-            >
-              <PlugZap :size="14" /> {{ busy === `connect:${account.name}` ? t('common.connecting') : t('common.connect') }}
-            </button>
-            <button v-else class="ghost" :disabled="!!busy" @click="disconnectAccount(account.name)">
-              <Plug :size="14" /> {{ t('common.disconnect') }}
-            </button>
-            <button class="ghost" :disabled="!!busy" :title="t('common.edit')" @click="openEdit(account.name)">
-              <Pencil :size="14" />
-            </button>
-            <button class="danger" :disabled="!!busy" :title="t('common.delete')" @click="confirmDelete(account.name)">
-              <Trash2 :size="14" />
-            </button>
-          </div>
-        </li>
-      </ul>
-      <footer class="list-foot">
-        <span class="hint">{{ t('overview.clientDir') }}</span>
-        <span class="mono">{{ overview?.vpnDir ?? t('common.notFound') }}</span>
-        <button class="ghost small" @click="revealConfig"><FolderOpen :size="13" /> {{ t('overview.openConfigDir') }}</button>
-      </footer>
-    </div>
-
-    <AccountDialog v-if="creating" :name="null" @close="creating = false" />
-    <AccountDialog v-if="editing" :name="editing" @close="editing = null" />
-
-    <div v-if="deleting" class="overlay" @click.self="deleting = null">
-      <div class="dialog" style="max-width: 420px">
-        <header><h2>{{ t('overview.deleteTitle') }}</h2></header>
-        <p class="muted">
-          {{ t('overview.deletePrefix') }}<span class="mono">{{ deleting }}</span>{{ t('overview.deleteSuffix') }}
-        </p>
-        <div class="row" style="justify-content: flex-end; margin-top: 16px">
-          <button class="ghost" @click="deleting = null">{{ t('common.cancel') }}</button>
-          <button class="danger" @click="doDelete(deleting)">{{ t('common.delete') }}</button>
-        </div>
-      </div>
-    </div>
-
-    <div v-if="toast" class="toast" :class="{ error: toast.error }">{{ toast.text }}</div>
   </section>
 </template>
 
@@ -380,7 +314,6 @@ watch(
   height: 100%;
   /* 作为 flex 子项必须允许收缩到内容以下，否则 height:100% 撑破容器、标题被裁 */
   min-height: 0;
-  overflow: auto;
 }
 
 .spin {
@@ -399,13 +332,8 @@ watch(
   align-items: flex-start;
   gap: 16px;
   flex: none;
-  /* 滚动时标题始终可见：页头流失会让人以为界面在跳 */
-  position: sticky;
   top: 0;
   z-index: 2;
-  padding-bottom: 10px;
-  margin-top: -18px;
-  padding-top: 18px;
   background: var(--bg);
 }
 
@@ -445,22 +373,87 @@ watch(
   color: var(--text-soft);
 }
 
-.status {
+.status.card {
+  position: relative;
   display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 14px 16px;
-  border-left: 3px solid var(--line-strong);
+  flex: 0 1 260px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 30px 22px 24px;
+  min-height: 220px;
+  max-height: 260px;
+  border: 0;
+  background: linear-gradient(180deg, var(--panel) 0%, var(--panel-muted) 100%);
+  text-align: center;
 }
 
 .status.connected {
-  border-left-color: var(--ok);
+  background: linear-gradient(180deg, var(--panel) 0%, var(--accent-soft) 170%);
 }
 
 .status-main {
   display: flex;
   flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  order: 2;
+  width: 100%;
+}
+
+.status-main > .row {
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.status-main > .row .strong,
+.status-main > .row .muted {
+  font-size: 20px;
+  color: var(--text);
+}
+
+.status-main > .row .badge {
+  order: 2;
+}
+
+.status-main > .row .disconnected-status {
+  position: absolute;
+  top: 22px;
+  left: 22px;
+  order: 0;
+}
+
+.connection-action {
+  width: 120px;
+  height: 120px;
+  border: 0;
+  border-radius: 50%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
   gap: 6px;
+  color: white;
+  background: linear-gradient(145deg, #4c5bdd, #5967df);
+  box-shadow: 0 10px 28px color-mix(in srgb, var(--accent) 24%, transparent);
+  transition: transform 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
+  order: 1;
+}
+
+.connection-action:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 14px 32px color-mix(in srgb, var(--accent) 32%, transparent);
+}
+
+.connection-action:disabled {
+  opacity: .65;
+}
+
+.action-label {
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .strong {
@@ -483,26 +476,34 @@ watch(
 
 .status-actions {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 8px;
-  flex: none;
+  justify-content: center;
+  order: 1;
+  gap: 12px;
 }
 
 .status-actions button {
-  display: inline-flex;
-  gap: 6px;
-  align-items: center;
+  cursor: pointer;
 }
 
-.grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-  /* 指标行不参与纵向收缩：否则窗口不够高时卡片被压扁而不出现滚动 */
+/* 未连接时的配置选择器：只占状态行的一角，不把整张卡片撑成表单 */
+.picker {
+  width: 240px;
   flex: none;
 }
 
+.grid {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  /* 指标行不参与纵向收缩：否则窗口不够高时卡片被压扁而不出现滚动 */
+  flex: 0 0 auto;
+}
+
 .metric {
+  flex: 1 1 180px;
+  min-width: 0;
   padding: 12px 14px;
   display: flex;
   flex-direction: column;
@@ -526,93 +527,5 @@ watch(
   padding: 0;
   color: var(--text-soft);
   font-size: 11px;
-}
-
-.list {
-  padding: 0;
-  overflow: hidden;
-}
-
-.list-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  padding: 12px 16px;
-  border-bottom: 0.5px solid var(--line);
-}
-
-.list ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.list li {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 16px;
-  border-bottom: 0.5px solid var(--line);
-}
-
-.list li:last-child {
-  border-bottom: none;
-}
-
-.list li.active {
-  background: var(--ok-soft);
-}
-
-.acct {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  min-width: 0;
-}
-
-.actions {
-  flex-shrink: 0;
-}
-
-.actions button {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-height: 30px;
-  padding: 4px 10px;
-}
-
-.empty {
-  padding: 28px 16px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-}
-
-.empty button {
-  display: inline-flex;
-  gap: 6px;
-  align-items: center;
-}
-
-.list-foot {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  padding: 8px 16px;
-  background: var(--panel-muted);
-  border-top: 0.5px solid var(--line);
-}
-
-.list-foot button.small {
-  margin-left: auto;
-  min-height: 26px;
-  padding: 2px 8px;
-  display: inline-flex;
-  gap: 5px;
-  align-items: center;
-  font-size: 12px;
 }
 </style>

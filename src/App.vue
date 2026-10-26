@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { listen } from '@tauri-apps/api/event'
-import { Activity, LayoutList, LogOut, Settings as SettingsIcon } from 'lucide-vue-next'
+import { Activity, LayoutList, Layers, LogOut, Settings as SettingsIcon } from 'lucide-vue-next'
 import OverviewTab from './components/OverviewTab.vue'
+import ProfilesTab from './components/ProfilesTab.vue'
 import DiagnosticsTab from './components/DiagnosticsTab.vue'
 import SettingsTab from './components/SettingsTab.vue'
 import TitleBar from './components/TitleBar.vue'
@@ -11,7 +12,7 @@ import { bootstrap, overview, toast } from './lib/api'
 import { t } from './lib/i18n'
 import { invoke } from '@tauri-apps/api/core'
 
-const tab = ref<'overview' | 'diag' | 'settings'>('overview')
+const tab = ref<'overview' | 'profiles' | 'diag' | 'settings'>('overview')
 const ready = ref(false)
 
 onMounted(async () => {
@@ -43,6 +44,9 @@ async function quit() {
             <LayoutList :size="15" /> {{ t('app.nav.connections') }}
             <span class="pill" :class="overview?.snapshot ? 'ok' : 'off'">{{ overview?.snapshot ? t('app.badge.connected') : t('app.badge.offline') }}</span>
           </button>
+          <button :class="{ active: tab === 'profiles' }" @click="tab = 'profiles'">
+            <Layers :size="15" /> {{ t('app.nav.profiles') }}
+          </button>
           <button :class="{ active: tab === 'diag' }" @click="tab = 'diag'">
             <Activity :size="15" /> {{ t('app.nav.diag') }}
           </button>
@@ -51,13 +55,13 @@ async function quit() {
           </button>
         </nav>
         <div class="side-foot">
-          <p class="hint">{{ t('app.sidebarHint') }}</p>
           <button class="ghost small" @click="quit"><LogOut :size="13" /> {{ t('app.quit') }}</button>
         </div>
       </aside>
 
       <main>
         <OverviewTab v-if="ready && tab === 'overview'" />
+        <ProfilesTab v-else-if="ready && tab === 'profiles'" />
         <DiagnosticsTab v-else-if="ready && tab === 'diag'" />
         <SettingsTab v-else-if="ready && tab === 'settings'" />
       </main>
@@ -75,10 +79,12 @@ async function quit() {
   height: 100%;
   position: relative;
 }
+main {
+  overflow: auto;
+}
 
 .shell {
-  display: grid;
-  grid-template-columns: 188px minmax(0, 1fr);
+  display: flex;
   /* 顶栏固定占 36px，剩余高度才归内容区；不收缩否则内部滚动容器失效 */
   flex: 1;
   min-height: 0;
@@ -86,18 +92,22 @@ async function quit() {
 }
 
 .side {
-  background: var(--panel);
+  background: var(--side-bg);
   border-right: 0.5px solid var(--line);
   display: flex;
   flex-direction: column;
   padding: 12px 12px 12px;
   gap: 18px;
+  flex: 0 0 188px;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 nav {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  flex: 0 0 auto;
 }
 
 nav button {
@@ -165,6 +175,7 @@ nav button.active::before {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  flex: 0 0 auto;
 }
 
 .side-foot button.small {
@@ -178,9 +189,15 @@ nav button.active::before {
 }
 
 main {
-  overflow: hidden;
-  background: var(--bg);
-  /* grid 子项默认 min-height:auto 会按内容撑开，导致内部滚动容器失效 */
+  flex: 1 1 auto;
+  min-width: 0;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* 给页面滚动区留出与标题栏、窗口边缘的呼吸空间。
+     各页自己的 overflow:auto 现在从这里开始，滚动条不会再贴着顶部菜单。 */
+  padding: 12px 12px 12px 0;
+  background: var(--bg);
 }
 </style>

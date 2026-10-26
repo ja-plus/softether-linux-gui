@@ -7,6 +7,7 @@ import NumberInput from './NumberInput.vue'
 import { t } from '../lib/i18n'
 
 const target = ref('')
+const autoTarget = ref('')
 const count = ref(20)
 const running = ref(false)
 const results = ref<DiagResult[]>([])
@@ -14,8 +15,17 @@ const error = ref('')
 
 const iface = computed(() => overview.value?.iface ?? null)
 
-onMounted(() => {
+/**
+ * 空输入时真正会 ping 的地址：设置里填过的优先，否则用后端按当前隧道算出来的网关。
+ *
+ * 这里刻意不预置任何内网地址——每个人的内网都不一样，写死一个只会让诊断打到
+ * 一个与他无关的地址上。
+ */
+const effectiveTarget = computed(() => target.value.trim() || autoTarget.value)
+
+onMounted(async () => {
   target.value = settings.value?.diagTarget || ''
+  await refreshAutoTarget()
 })
 
 // settings 是异步加载的，挂载时可能还是 null；到达后要回填默认目标，否则按钮永远 disabled
@@ -26,12 +36,23 @@ watch(
   },
 )
 
+// 隧道换了（连上 / 断开 / 换网卡）默认地址就变了，跟着重算
+watch(() => overview.value?.iface, refreshAutoTarget)
+
+async function refreshAutoTarget() {
+  try {
+    autoTarget.value = (await invoke<string | null>('diag_default_target')) ?? ''
+  } catch {
+    autoTarget.value = ''
+  }
+}
+
 async function runCheck() {
   error.value = ''
   running.value = true
   try {
     const result = await invoke<DiagResult>('run_diagnostics', {
-      target: target.value.trim(),
+      target: effectiveTarget.value,
       count: Number(count.value) || 20,
     })
     results.value = [result, ...results.value].slice(0, 8)
@@ -67,13 +88,17 @@ function quality(result: DiagResult): { text: string; tone: string } {
       <div class="row">
         <div class="field" style="flex: 1">
           <label>{{ t('diag.target') }}</label>
-          <input v-model="target" type="text" :placeholder="t('diag.targetPlaceholder')" />
+          <input
+            v-model="target"
+            type="text"
+            :placeholder="autoTarget ? t('diag.autoTarget', { target: autoTarget }) : t('diag.targetPlaceholder')"
+          />
         </div>
         <div class="field" style="width: 110px">
           <label>{{ t('diag.count') }}</label>
           <NumberInput v-model="count" :min="1" :max="100" />
         </div>
-        <button class="primary" :disabled="running || !target.trim()" @click="runCheck">
+        <button class="primary" :disabled="running || !effectiveTarget" @click="runCheck">
           <Play :size="14" /> {{ running ? t('diag.running') : t('diag.start') }}
         </button>
       </div>
@@ -139,7 +164,7 @@ function quality(result: DiagResult): { text: string; tone: string } {
   flex-direction: column;
   gap: 12px;
   height: 100%;
-  overflow: auto;
+  min-height: 0;
 }
 
 .panel {

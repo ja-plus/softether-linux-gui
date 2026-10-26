@@ -87,8 +87,9 @@ function toggleMaximize(event: MouseEvent) {
   border-radius: calc(var(--mark-radius) * 0.7);
   background: var(--mark-bg);
   color: #fff;
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   font-size: 9px;
   font-weight: 500;
   letter-spacing: 0.4px;
@@ -105,7 +106,8 @@ function toggleMaximize(event: MouseEvent) {
 }
 
 .caption {
-  margin-left: auto;
+  order: var(--caption-order);
+  margin: var(--caption-margin);
   display: flex;
   align-items: center;
   gap: var(--caption-gap);
@@ -117,22 +119,46 @@ function toggleMaximize(event: MouseEvent) {
 .cap-btn {
   width: var(--caption-w);
   height: var(--caption-h);
-  display: grid;
-  place-items: center;
-  background: transparent;
-  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--caption-dot-min);
+  border: var(--caption-border);
   border-radius: var(--caption-radius);
   color: var(--caption-fg);
   padding: 0;
 }
 
+/*
+ * 每个按钮的底色/hover 色都由风格变量给：
+ * Windows/Deepin 平时透明（图标可见）、悬停才出色块；macOS 平时就是红黄绿圆点，
+ * 悬停只让图标浮现。这样组件里一个风格判断都不用写 ——
+ * 也别用 :global(html[data-style=...]) 做特例，它会把后代选择器整段吞掉。
+ */
+.cap-btn:nth-child(2) {
+  background: var(--caption-dot-max);
+}
+
+.cap-btn.close {
+  background: var(--caption-dot-close);
+}
+
+/* 交通灯只有 12px，图标要缩进圆点里才不溢出（其余风格下 scale 为 1） */
+.cap-btn svg {
+  transform: scale(var(--caption-icon-scale));
+}
+
 .cap-btn:hover {
-  background: var(--caption-hover-bg);
+  background: var(--caption-dot-min-hover);
   color: var(--caption-hover-fg);
 }
 
+.cap-btn:nth-child(2):hover {
+  background: var(--caption-dot-max-hover);
+}
+
 .cap-btn.close:hover {
-  background: var(--caption-close-bg);
+  background: var(--caption-dot-close-hover);
   color: var(--caption-close-fg);
 }
 </style>

@@ -82,6 +82,18 @@ const SOURCE_OPTIONS = computed<{ value: ClientSource; title: string; note: stri
   { value: 'custom', title: t('client.customTitle'), note: t('client.customNote') },
 ])
 
+/**
+ * 可选界面风格。
+ *
+ * 卡片结构完全一致，只有预览图配色不同（由 .preview.<value> 决定），
+ * 所以统一成一份数据驱动；新增一套风格只需要在这里加一行 + 一个 CSS 块。
+ */
+const STYLE_OPTIONS = computed<{ value: UiStyle; name: string; desc: string }[]>(() => [
+  { value: 'win11', name: t('settings.style1'), desc: t('settings.style1Desc') },
+  { value: 'deepin', name: t('settings.style2'), desc: t('settings.style2Desc') },
+  { value: 'mac', name: t('settings.style3'), desc: t('settings.style3Desc') },
+])
+
 /** 内置客户端总在第一位；它不来自扫盘，所以单独取 */
 const bundled = computed(() => candidates.value.find((item) => item.source === 'bundled') ?? null)
 
@@ -423,6 +435,7 @@ async function toggleAutostart() {
 
 <template>
   <section class="settings">
+    <div class="settings-scroll">
     <header>
       <h1>{{ t('settings.title') }}</h1>
       <p class="hint">{{ t('settings.subtitle', { dir: configDir }) }}</p>
@@ -461,12 +474,14 @@ async function toggleAutostart() {
       <h2>{{ t('settings.style') }}</h2>
       <div class="styles">
         <button
+          v-for="option in STYLE_OPTIONS"
+          :key="option.value"
           type="button"
           class="style-card"
-          :class="{ on: draft.uiStyle === 'win11' }"
-          @click="pickStyle('win11')"
+          :class="{ on: draft.uiStyle === option.value }"
+          @click="pickStyle(option.value)"
         >
-          <span class="preview win11">
+          <span class="preview" :class="option.value">
             <span class="pv-side">
               <i class="pv-nav on"></i>
               <i class="pv-nav"></i>
@@ -477,28 +492,8 @@ async function toggleAutostart() {
               <i class="pv-btn"></i>
             </span>
           </span>
-          <span class="style-name">{{ t('settings.style1') }}</span>
-          <span class="hint">{{ t('settings.style1Desc') }}</span>
-        </button>
-        <button
-          type="button"
-          class="style-card"
-          :class="{ on: draft.uiStyle === 'deepin' }"
-          @click="pickStyle('deepin')"
-        >
-          <span class="preview deepin">
-            <span class="pv-side">
-              <i class="pv-nav on"></i>
-              <i class="pv-nav"></i>
-              <i class="pv-nav"></i>
-            </span>
-            <span class="pv-main">
-              <i class="pv-card"></i>
-              <i class="pv-btn"></i>
-            </span>
-          </span>
-          <span class="style-name">{{ t('settings.style2') }}</span>
-          <span class="hint">{{ t('settings.style2Desc') }}</span>
+          <span class="style-name">{{ option.name }}</span>
+          <span class="hint">{{ option.desc }}</span>
         </button>
       </div>
       <p class="hint" style="margin: 2px 0 0">{{ t('settings.stylePreview') }}</p>
@@ -695,12 +690,13 @@ async function toggleAutostart() {
       <h2>{{ t('client.diagTitle') }}</h2>
       <div class="field" style="max-width: 320px">
         <label>{{ t('client.diagTargetLabel') }}</label>
-        <input v-model="draft.diagTarget" type="text" placeholder="10.10.4.160" />
+        <input v-model="draft.diagTarget" type="text" :placeholder="t('diag.targetPlaceholder')" />
       </div>
       <p class="hint" style="margin: 4px 0 0">{{ t('client.diagHint') }}</p>
     </div>
 
     <p v-if="error" class="error">{{ error }}</p>
+    </div>
 
     <div class="foot">
       <span class="auto-status" :class="autoState">
@@ -717,12 +713,20 @@ async function toggleAutostart() {
 
 <style scoped>
 .settings {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.settings-scroll {
+  flex: 1;
+  min-height: 0;
   padding: 18px 20px 24px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  height: 100%;
   overflow: auto;
+  gap: 12px;
 }
 
 .block {
@@ -779,18 +783,13 @@ async function toggleAutostart() {
   padding: 0 4px;
 }
 
-/* 即时保存状态栏：颜色即语义，不额外占一行也不弹 toast。
-   现在没有「保存」按钮了，这条就是唯一的反馈，所以钉在滚动容器底部，
-   滚到哪儿都看得见；负 margin 吃掉容器 padding，让底边横贯整行。 */
+/* 状态栏独立于滚动区，始终固定在设置页底部。 */
 .foot {
-  position: sticky;
-  bottom: 0;
-  z-index: 1;
+  flex: none;
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
-  margin: 2px -20px -24px;
   padding: 8px 20px 10px;
   background: var(--bg);
   border-top: 0.5px solid var(--line);
@@ -877,6 +876,7 @@ async function toggleAutostart() {
   color: var(--accent-ink);
 }
 
+/* 三张风格卡片等宽均分；窄窗口按 auto-fit 折成两行，不再靠固定宽度硬撑 */
 .styles {
   display: flex;
   flex-wrap: wrap;
@@ -884,11 +884,11 @@ async function toggleAutostart() {
 }
 
 .style-card {
+  flex: 1 1 196px;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 3px;
-  width: 232px;
   padding: 10px;
   background: var(--panel);
   border: 1px solid var(--line-strong);
@@ -919,7 +919,7 @@ async function toggleAutostart() {
   margin-top: 2px;
 }
 
-/* 缩略示意图刻意不跟主题变量走：两块预览各画各的风格，切换前后都得是“目标风格的样子” */
+/* 缩略示意图刻意不跟主题变量走：每套预览各画各的风格，切换前后都得是“目标风格的样子” */
 .preview {
   position: relative;
   display: flex;
@@ -1037,16 +1037,65 @@ async function toggleAutostart() {
   box-shadow: 0 1px 3px rgba(43, 121, 255, 0.4);
 }
 
+/* macOS：侧栏压深一档、选中是蓝色小圆角、卡片只有一层极淡描影。
+   与 Deepin 预览的差别刻意做在「侧栏底色 + 选中项形状」上，
+   否则两套都蓝都白，缩略图根本分不出来。 */
+.preview.mac {
+  background: #f5f5f7;
+}
+
+.preview.mac .pv-side {
+  position: relative;
+  /* 顶上留出一条给交通灯，否则会压在第一个导航条上 */
+  padding-top: 17px;
+  background: #eceef1;
+  border-right: 1px solid #e3e3e8;
+}
+
+/* 缩略图里最认得出的就是这三颗圆点，比配色差异有效得多 */
+.preview.mac .pv-side::before {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 7px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #ff5f57;
+  box-shadow: 7px 0 0 #febc2e, 14px 0 0 #28c840;
+}
+
+.preview.mac .pv-nav {
+  background: #dfdfe4;
+  border-radius: 4px;
+}
+
+.preview.mac .pv-nav.on {
+  background: #007aff;
+}
+
+.preview.mac .pv-card {
+  background: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.09);
+}
+
+.preview.mac .pv-btn {
+  background: #007aff;
+  border-radius: 6px;
+}
+
 /* ── 客户端来源选择 ─────────────────────────────────────────────── */
 
 /* 三张卡片横排，窄窗口自动折行；min-width 保证折行后仍是完整卡片 */
 .sources {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
 .source-card {
+  flex: 1 1 200px;
   display: flex;
   flex-direction: column;
   gap: 4px;

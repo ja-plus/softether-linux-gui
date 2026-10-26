@@ -98,17 +98,20 @@ export interface Settings {
   startClientOnLaunch: boolean
   /** 应用退出时停止客户端（仅当客户端由本应用拉起） */
   stopClientOnExit: boolean
-  /** 界面风格："win11" 或 "deepin"，其余取值按 win11 处理 */
+  /** 界面风格："win11" / "deepin" / "mac"，其余取值按 win11 处理 */
   uiStyle: string
   /** 界面语言："zh" 或 "en"，其余取值按 zh 处理 */
   locale: string
 }
 
-export type UiStyle = 'win11' | 'deepin'
+export type UiStyle = 'win11' | 'deepin' | 'mac'
+
+/** 已知风格的白名单；新增风格只改这一处，归一化和渲染都跟着走 */
+const UI_STYLES: readonly UiStyle[] = ['win11', 'deepin', 'mac']
 
 /** 配置文件可能被手改成任意值，未知风格一律回落 win11 */
 export function normalizeUiStyle(value: unknown): UiStyle {
-  return value === 'deepin' ? 'deepin' : 'win11'
+  return UI_STYLES.includes(value as UiStyle) ? (value as UiStyle) : 'win11'
 }
 
 /** 把界面风格落到 <html data-style>，styles.css 据此切换整套设计 token */

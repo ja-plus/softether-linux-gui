@@ -67,8 +67,8 @@ pub struct Settings {
     /// 应用退出时停止客户端服务（仅当客户端由本应用拉起）
     #[serde(default)]
     pub stop_client_on_exit: bool,
-    /// 界面风格："win11" 或 "deepin"。配置文件里被手改成别的值时，
-    /// 保存时归一化；渲染侧同样只认这两种，未知值一律按 win11 处理。
+    /// 界面风格："win11" / "deepin" / "mac"。配置文件里被手改成别的值时，
+    /// 保存时归一化；渲染侧同样只认这几种，未知值一律按 win11 处理。
     #[serde(default = "default_ui_style")]
     pub ui_style: String,
     /// 界面语言："zh" 或 "en"。未知值一律按 zh 处理。
@@ -168,7 +168,9 @@ impl Default for Settings {
             active_account: default_account(),
             notifications: true,
             start_minimized: true,
-            diag_target: "10.10.4.160".into(),
+            // 不预置任何地址：内网目标因人而异，写死一个只会让别人的诊断打到一个
+            // 与他无关的地址上。留空由前端回落到当前隧道网关（`interface_gateway`）。
+            diag_target: String::new(),
             routes: RouteConfig::default(),
             start_client_on_launch: false,
             stop_client_on_exit: false,
@@ -248,9 +250,9 @@ impl Settings {
         })
     }
 
-    /// 把界面风格收敛到已知取值（win11 / deepin），手改坏的按 win11 处理。
+    /// 把界面风格收敛到已知取值（win11 / deepin / mac），手改坏的按 win11 处理。
     fn normalize_ui_style(&mut self) {
-        if self.ui_style != "deepin" {
+        if !matches!(self.ui_style.as_str(), "deepin" | "mac") {
             self.ui_style = default_ui_style();
         }
     }
@@ -614,6 +616,35 @@ pub fn interface_ipv4(iface: &str) -> Option<String> {
     text.split_whitespace().skip_while(|token| *token != "inet").nth(1).map(|s| s.to_string())
 }
 
+/// 隧道网段的第一跳：`192.168.50.19/24` → `192.168.50.1`。
+///
+/// 诊断页「没填目标」时用它兜底。规则必须与下发路由时用的网关一致——
+/// 那边在 `connect_routes_script` 的 shell 里推导（要共用同一次 pkexec），
+/// 两处都按「`proto kernel` 网段路由 + 主机位改 1」这一条来，别各写一套。
+pub fn interface_gateway(iface: &str) -> Option<String> {
+    let output = Command::new("ip").args(["-4", "-o", "route", "show", "dev", iface]).output().ok()?;
+    parse_interface_gateway(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// 从 `ip -4 -o route show dev <iface>` 的输出里算出第一跳。
+///
+/// 只认 `proto kernel` 那条（那是 DHCP / 静态地址带来的网段路由），
+/// 没有它说明网卡还没地址，返回 None 而不是瞎猜一个。
+fn parse_interface_gateway(output: &str) -> Option<String> {
+    let net = output
+        .lines()
+        .find(|line| line.contains("proto kernel") && line.contains(" src "))?
+        .split_whitespace()
+        .next()?;
+    let base = net.split('/').next()?;
+    let mut octets: Vec<&str> = base.split('.').collect();
+    if octets.len() != 4 || octets.iter().any(|octet| octet.parse::<u8>().is_err()) {
+        return None;
+    }
+    octets[3] = "1";
+    Some(octets.join("."))
+}
+
 pub fn route_exists(net: &str) -> bool {
     let output = Command::new("ip").args(["-4", "route", "show"]).output();
     match output {
@@ -624,15 +655,30 @@ pub fn route_exists(net: &str) -> bool {
     }
 }
 
+/// 网卡上的网段路由，**不含 `proto kernel` 那条连接路由**。
+///
+/// 连接路由（`192.168.50.0/24 proto kernel scope link src …`）是内核配地址时随地址
+/// 自动生成的，只说明网卡还挂着 IP。把它算成"网段路由"的话，断开后只要地址没清
+///（比如关了「断开时清空 IPv4」），就会永远报「内网可能被黑洞」——可真正被黑洞的
+/// 只是隧道自己的虚拟网段，配置里的内网网段早就不走这块网卡了。
 pub fn routes_on(iface: &str) -> Vec<String> {
     let output = Command::new("ip").args(["-4", "route", "show", "dev", iface]).output();
     match output {
-        Ok(output) => String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| line.split_whitespace().next().map(str::to_string))
-            .collect(),
+        Ok(output) => parse_routes_on(&String::from_utf8_lossy(&output.stdout)),
         Err(_) => Vec::new(),
     }
+}
+
+/// `routes_on` 的解析层，单拎出来可测。
+///
+/// 只滤 `proto kernel`；DHCP 下发的、手工加的网段路由都算数——隧道断着的时候
+/// 它们照样把内网流量引进黑洞。
+fn parse_routes_on(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter(|line| !line.contains("proto kernel"))
+        .filter_map(|line| line.split_whitespace().next().map(str::to_string))
+        .collect()
 }
 
 /// 连接时的一次性提权脚本：要 DHCP 地址 → 推导隧道网关 → 下发网段路由 + MTU。
@@ -751,16 +797,19 @@ pub fn has_dhcp_client() -> bool {
 
 /// 断开时是否真的还有东西要清理。
 ///
-/// 没有残留路由、网卡上也没 IPv4 时，`disconnect_routes_script` 里的每条命令都是空转，
+/// 没有残留路由、也不会清地址时，`disconnect_routes_script` 里的每条命令都是空转，
 /// 却仍然要弹一次密码框——用户会以为断开本身需要提权。先查一遍，没活就不提权。
-pub fn needs_disconnect_cleanup(iface: &str) -> bool {
+///
+/// `flush_addr` 是设置里的「断开时清空 IPv4」：关着的话网卡上剩地址是**故意留的**，
+/// 不能拿它当"有活要干"，否则关了开关的人每次断开都白弹一次框。
+pub fn needs_disconnect_cleanup(iface: &str, flush_addr: bool) -> bool {
     if iface.is_empty() || !iface.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
         return false;
     }
     if !routes_on(iface).is_empty() {
         return true;
     }
-    interface_ipv4(iface).is_some()
+    flush_addr && interface_ipv4(iface).is_some()
 }
 
 pub fn path_display(path: &Path) -> String {
@@ -831,6 +880,40 @@ mod tests {
     }
 
     #[test]
+    fn gateway_is_network_first_hop() {
+        // `ip -4 -o route show dev vpn_vpn` 的真实形态：网段路由 + 一条经网关的明细路由。
+        // 只认 proto kernel 那条，主机位一律换成 .1——和下发路由时算的网关保持一致。
+        let output = "192.168.50.0/24 proto kernel scope link src 192.168.50.19\n\
+                      10.10.0.0/16 via 192.168.50.1 dev vpn_vpn\n";
+        assert_eq!(parse_interface_gateway(output).as_deref(), Some("192.168.50.1"));
+    }
+
+    #[test]
+    fn gateway_needs_kernel_route() {
+        // 网卡还没地址（没有 proto kernel 网段路由）时不许瞎猜，返回 None 让用户自己填。
+        assert_eq!(parse_interface_gateway("default via 192.168.1.1 dev wlp0s20f3\n"), None);
+        assert_eq!(parse_interface_gateway(""), None);
+    }
+
+    #[test]
+    fn subnet_routes_exclude_kernel_connected_route() {
+        // proto kernel 是配地址时自动生成的连接路由，不是下发的网段路由：
+        // 算进来的话，关掉「断开时清空 IPv4」的用户每次断开都会被误报"内网黑洞"。
+        let output = "192.168.50.0/24 proto kernel scope link src 192.168.50.24\n\
+                      10.0.0.0/8 via 192.168.50.1 dev vpn_vpn\n\
+                      10.10.0.0/16 via 192.168.50.1 dev vpn_vpn\n";
+        assert_eq!(parse_routes_on(output), ["10.0.0.0/8", "10.10.0.0/16"].map(String::from).to_vec());
+        // 只剩连接路由时视为"没有网段路由"
+        assert!(parse_routes_on("192.168.50.0/24 proto kernel scope link src 192.168.50.24\n").is_empty());
+    }
+
+    #[test]
+    fn default_diag_target_is_not_hardcoded() {
+        // 诊断目标不再预置具体内网地址：默认值必须是空的，由隧道网关兜底。
+        assert!(Settings::default().diag_target.is_empty());
+    }
+
+    #[test]
     fn helper_path_matches_policy_annotation() {
         // Rust 侧的调用路径和 polkit policy 里的 exec.path 必须逐字一致，
         // 否则 pkexec 会退回到默认 action id，规则不匹配 → 又开始弹框，
@@ -889,7 +972,8 @@ mod tests {
     fn disconnect_script_rejects_bad_iface() {
         let subnets = vec!["10.0.0.0/8".to_string()];
         assert!(disconnect_routes_script("vpn; rm -rf /", &subnets, true).is_err());
-        assert!(!needs_disconnect_cleanup("vpn; rm -rf /"));
+        assert!(!needs_disconnect_cleanup("vpn; rm -rf /", true));
+        assert!(!needs_disconnect_cleanup("vpn; rm -rf /", false));
     }
 
     #[test]
@@ -950,6 +1034,10 @@ mod tests {
         settings.ui_style = "deepin".into();
         settings.normalize_ui_style();
         assert_eq!(settings.ui_style, "deepin");
+        // mac 是后加的风格，同样要能原样落盘
+        settings.ui_style = "mac".into();
+        settings.normalize_ui_style();
+        assert_eq!(settings.ui_style, "mac");
         // 手改坏的取值收敛成 win11，而不是让整份配置失效
         settings.ui_style = "win95".into();
         settings.normalize_ui_style();

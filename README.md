@@ -1,6 +1,6 @@
 # SoftEther Tray
 
-**English** | [简体中文](README.zh-CN.md) · [Detailed usage guide (中文)](docs/usage.md)
+**English** | [简体中文](README.zh-CN.md) · [Detailed usage guide](docs/usage.md)
 
 A SoftEther VPN client that lives in the Linux system tray. The official SoftEther distribution ships a Windows Client Manager only — on Linux you get `vpncmd` — so this app adds a GUI on top of it.
 
@@ -12,7 +12,7 @@ A SoftEther VPN client that lives in the Linux system tray. The official SoftEth
 - Status panel: tunnel IP, server, HUB, MTU, total traffic, and live up/down rate charts
 - Network diagnostics: packet loss / latency checks against any intranet target
 - Desktop notifications on connection changes; optional launch at login and auto-connect
-- Interface styles: Windows 11 (Fluent) and Deepin 25, previewed live in Settings
+- Interface styles: Windows 11 (Fluent), Deepin 25, and macOS, previewed live in Settings
 - Bilingual interface: Simplified Chinese and English, switchable in Settings; on first launch it follows the system locale (Chinese for mainland China, English elsewhere)
 - Choose the SoftEther client directory: bundled, auto-detected, or a custom path
 - Custom title bar (no system decoration): drag to move, double-click to maximize, edge resizing; the close button still hides to tray

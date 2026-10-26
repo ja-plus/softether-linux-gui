@@ -264,8 +264,9 @@ onBeforeUnmount(clearHold)
 
 .step {
   flex: 1;
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   min-height: 0;
   padding: 0;
   border: none;

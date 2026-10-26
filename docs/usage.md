@@ -1,247 +1,227 @@
-# SoftEther Tray 使用说明
+# SoftEther Tray Usage Guide
 
-## 启动
+**English** | [简体中文](usage.zh-CN.md)
 
-- 从应用菜单打开 **SoftEther Tray**，或直接运行 `softether-tray`
-- 关闭窗口不会退出，只是隐藏到托盘；真正退出走托盘菜单里的 **退出 SoftEther Tray**
-- 托盘图标左键 = 打开主窗口；右键 = 菜单（状态、连接/断开、网络诊断、退出）
+## Starting the app
 
-## 连接
+- Open **SoftEther Tray** from the application menu, or run `softether-tray` directly
+- Closing the window does not quit the app — it only hides to the tray. To really quit, use **Quit SoftEther Tray** in the tray menu
+- Left-click the tray icon = open the main window; right-click = menu (status, connect/disconnect, network diagnostics, quit)
 
-1. 在“连接”页点某个配置的 **连接**，或托盘菜单直接点 **连接 xxx**
-2. 首次操作可能出现系统密码框（pkexec），用于启动服务和写路由；**一次连接最多弹一次**
-3. 连上后状态卡片显示隧道 IP、MTU、累计流量和实时速率
+## Connecting
 
-断开时应用会删掉该网段路由并清空网卡地址，不会留下“内网全黑洞”的残留路由。
+1. On the "Connect" tab click **Connect** on a profile, or click **Connect xxx** directly in the tray menu
+2. The first privileged operation may pop up a system password prompt (pkexec), used to start the service and install routes; **at most one prompt per connection**
+3. Once connected, the status card shows the tunnel IP, MTU, total traffic, and live rates
 
-### 什么时候会弹密码框
+On disconnect the app removes the subnet routes and clears the adapter address, so no stale route is left turning the intranet into a black hole.
 
-提权只在**真的需要改内核网络配置**时才发生，不是每次操作都要：
+### When the password prompt appears
 
-| 操作 | 会弹密码框吗 | 原因 |
+Elevation happens **only when the kernel network configuration actually has to change** — not on every action:
+
+| Action | Password prompt? | Why |
 |---|---|---|
-| 连接 | 会（**只一次**） | 要拿到 DHCP 地址、改 MTU、写网段路由 |
-| 断开 | **通常不会** | 隧道断开本身不需要 root；只有网卡上还有残留路由或 IPv4 时，才提权去清理 |
-| 启动/停止客户端 | 会 | `vpnclient` 是 root 守护进程 |
+| Connect | Yes (**once only**) | Needs to obtain a DHCP address, change the MTU, and install subnet routes |
+| Disconnect | **Usually not** | Tearing down the tunnel itself needs no root; elevation only happens to clean up leftover routes or IPv4 on the adapter |
+| Start/stop the client | Yes | `vpnclient` is a root daemon |
 
-一次连接里需要 root 的其实是三件事：申请 DHCP 地址、改 MTU、下发网段路由。这三件事被合进
-**同一个脚本、同一次 pkexec**，所以只会弹一次密码框。网关地址也在那段脚本里由 shell 现算
-（取网卡上 `proto kernel` 那条路由的第一跳），不再单独提权去读——否则就是第二个密码框。
+A single connection really needs root for three things: requesting a DHCP address, changing the MTU, and installing subnet routes. These three are folded into **one script and one pkexec call**, so the password prompt appears only once. The gateway address is also computed on the fly by the shell inside that script (the first hop of the adapter's `proto kernel` route) instead of being read through a separate elevation — that would be a second prompt.
 
-如果装了 sudoers 白名单（见文末），启停客户端那些调用会走 `sudo -n` 静默通过，连接时可能
-**一个密码框都不出现**。
+If the sudoers whitelist (see the end of this doc) is installed, client start/stop calls pass silently through `sudo -n`, and connecting may show **no password prompt at all**.
 
-断开的顺序是「先断隧道，再打扫战场」。清理这一步失败（比如你取消了密码框）不会让断开失败——
-隧道其实已经断了，只是路由可能还留着，界面上会提示你手工清一下：
+Disconnect works in the order "tear down the tunnel first, clean up afterwards". If the cleanup step fails (e.g. you cancel the password prompt) the disconnect itself still succeeds — the tunnel is already down, but routes may linger; the UI will tell you to clean them up manually:
 
 ```bash
 sudo ip route del 10.0.0.0/8 dev vpn_vpn
 ```
 
-只删本应用加过的网段。`fe80::/64`、local、multicast 这些 IPv6 路由是内核随网卡自己维护的，
-不需要也不该手动删。
+Only delete subnets this app installed. IPv6 routes such as `fe80::/64`, local, and multicast are maintained by the kernel along with the adapter; they need not and should not be deleted by hand.
 
-### 隧道通了但网卡没有 IP
+### The tunnel is up but the adapter has no IP
 
-SoftEther 的 Linux 客户端只建立链路层隧道，**不会替你给虚拟网卡配 IP**。所以「会话已建立」
-和「网卡有地址」是两件事，后者不成立时路由也没处可下，内网自然不通。
+The SoftEther Linux client only establishes a link-layer tunnel; **it does not configure an IP on the virtual adapter for you**. So "session established" and "adapter has an address" are two different things — without the latter there is nowhere to install routes, and the intranet is simply unreachable.
 
-应用的连接流程是这样的：
+The app's connection flow is:
 
-1. 建隧道，等会话状态变成「连接完成」
-2. 检查虚拟网卡有没有 IPv4；**没有就自动跑一次 DHCP**（`dhclient -1` 或 `dhcpcd -1`，
-   只请求一次就退出，不在托盘应用里留守护进程）
-3. 仍然没有地址才报错，并按原因分两种提示
+1. Build the tunnel and wait for the session state to become "connected"
+2. Check whether the virtual adapter has an IPv4 address; **if not, run DHCP once automatically** (`dhclient -1` or `dhcpcd -1` — it makes one request and exits, leaving no daemon inside the tray app)
+3. Only if there is still no address does it report an error, with two different messages depending on the cause
 
-既然 DHCP 是自动做的，那报错通常说明两件事之一：
+Since DHCP is run automatically, an error usually means one of two things:
 
-| 提示 | 含义 | 怎么办 |
+| Message | Meaning | What to do |
 |---|---|---|
-| DHCP 没有响应 | 本地客户端正常，但服务端不给地址 | 在服务端 HUB 上启用「虚拟 DHCP 服务器」，或给网卡配静态地址 |
-| 系统没有 dhclient/dhcpcd | 本机缺 DHCP 客户端 | `sudo apt install isc-dhcp-client`，或手工配静态地址 |
+| DHCP got no response | The local client is fine, but the server hands out no address | Enable the "Virtual DHCP Server" on the server-side HUB, or configure a static address on the adapter |
+| No dhclient/dhcpcd on the system | The machine lacks a DHCP client | `sudo apt install isc-dhcp-client`, or configure a static address manually |
 
-**配静态地址**（换成实际网段）：
+**Configure a static address** (substitute your actual subnet):
 
 ```bash
 sudo ip -4 addr add 192.168.50.19/24 dev vpn_vpn
 sudo ip link set dev vpn_vpn up
 ```
 
-配好后再点一次「连接」，应用会检测到地址并接着下发路由。
+After that, click "Connect" again — the app detects the address and installs the routes.
 
-### 网段列表为什么要自己填（以及在验证什么）
+### Why you have to fill in the subnet list yourself (and what the button verifies)
 
-这是 Linux 版和 Windows 版最大的体验差异，原因已查清、不是配置问题：
+This is the biggest experience gap between the Linux and Windows clients, and the cause has been identified — it is not a configuration problem:
 
-**Windows 版客户端会自己写路由表，Linux 版不会。**
+**The Windows client writes the routing table itself; the Linux client does not.**
 
-Windows 版 `vpnclient` 以 LocalSystem 常驻，能把服务端虚拟 DHCP 推送的路由
-（`PUSHROUTE`）直接写进系统路由表，用户完全看不到。Linux 版的同一个服务虽然
-**编译进了同样的代码**，但实际运行中不做这件事 —— 实测重连后路由表没有任何
-新增条目，也没有自己拉起 DHCP 客户端。所以内网网段只能由本应用代写。
+The Windows `vpnclient` runs as LocalSystem and writes routes pushed by the server's virtual DHCP (`PUSHROUTE`) straight into the system routing table, invisibly to the user. The Linux client's service **contains the same code compiled in**, but in practice does not do this — after reconnecting, the routing table shows no new entries at all, and no DHCP client is started either. So intranet subnets can only be written by this app on your behalf.
 
-结论：**服务端下发了什么，本地问不出来**。所以列表要你填，或者至少确认默认三条够用。
+Conclusion: **you cannot ask the local side what the server pushed**. Hence the list is yours to fill in — or at least to confirm the three defaults are enough.
 
-### 「验证网段」按钮在测什么
+### What the "Verify subnets" button tests
 
-它只回答**能可靠回答**的问题，不做自动发现：
+It only answers questions it can answer **reliably** — it does no auto-discovery:
 
-| 结果 | 含义 | 怎么处理 |
+| Result | Meaning | What to do |
 |---|---|---|
-| `OK` | 该网段的流量确实被导向 VPN 网卡，且隧道那侧有响应 | 不用管 |
-| `NOROUTE` | 该网段的流量**没走 VPN**，被物理网卡接走了 | 检查这条网段是否保存成功、重连一次 |
-| `DEAD` | 路由在，但隧道整体不通 | 先看连接状态、网卡有没有 IP |
-| `TUNNEL down` | 网关 ping 不通，隧道已断 | 重连 |
+| `OK` | Traffic for that subnet really goes into the VPN adapter, and the far side of the tunnel responds | Nothing to do |
+| `NOROUTE` | Traffic for that subnet **does not go through the VPN**; the physical adapter picks it up | Check that the subnet was saved, then reconnect |
+| `DEAD` | The route exists, but the tunnel as a whole is down | Check the connection state and whether the adapter has an IP first |
+| `TUNNEL down` | The gateway does not answer pings; the tunnel is down | Reconnect |
 
-**为什么不自动发现网段**：试过两种猜法，都被实测否定 ——
+**Why no auto-discovery**: two guessing strategies were tried and both were disproven by real testing —
 
-1. 假设网段的 `.1`/`.254` 是网关 → `10.0.0.1` 根本不存在，但 `10.10.4.160`
-   通（27–40ms），说明内网设备既不在 `.1` 也不在 `.254`；
-2. 读 ARP 表 → 只能看到同一广播域（`192.168.50.0/24`）里的邻居，
-   跨网段目标永远不会出现在里面。
+1. Assume the subnet's `.1`/`.254` is the gateway → `10.0.0.1` does not exist at all, yet `10.10.4.160` answers (27–40 ms), so the intranet device is at neither `.1` nor `.254`;
+2. Read the ARP table → it only shows neighbors inside the same broadcast domain (`192.168.50.0/24`); targets on other subnets never appear there.
 
-同样地，**不对「某个网段里的 IP 通不通」下结论**：同一个网段里有的机器开 ICMP、
-有的不开，拿单个地址代表整个网段必然误报。所以按钮只保证「路由生效了没有」这个硬事实。
+Likewise, **it draws no conclusion about "whether an IP in a given subnet is reachable"**: within one subnet some machines answer ICMP and some do not, so letting a single address stand for a whole subnet guarantees false reports. The button therefore vouches only for the hard fact of "is the route in effect".
 
-### 一个真实案例：默认值不够用
+### A real case: the defaults are not enough
 
-如果你访问的内网地址不在默认三条里，表现是「VPN 显示已连接，但那个地址就是不通」，
-而且**很难看出原因** —— 包悄悄从物理网卡发出去了：
+If the intranet address you need is not covered by the three defaults, the symptom is "the VPN says connected, but that address just won't answer", and the cause is **hard to see** — the packets quietly leave through the physical adapter:
 
 ```bash
 ip route get 10.10.4.160
-# 修复前：10.10.4.160 via 192.168.84.254 dev wlp0s20f3   ← 走 Wi-Fi，100% 丢包
-# 修复后：10.10.4.160 via 192.168.50.1 dev vpn_vpn       ← 走隧道，27–40ms
+# before fix: 10.10.4.160 via 192.168.84.254 dev wlp0s20f3   <- Wi-Fi, 100% loss
+# after fix:  10.10.4.160 via 192.168.50.1 dev vpn_vpn       <- tunnel, 27-40ms
 ```
 
-判断口诀：`ip route get <目标>` 的 `dev` 必须是 `vpn_vpn`。不是就说明该网段没被覆盖。
+The rule of thumb: in `ip route get <target>`, the `dev` must be `vpn_vpn`. Anything else means that subnet is not covered.
 
-## 配置从哪来
+## Where the profiles come from
 
-应用直接读 SoftEther 客户端里的连接配置，所以：
+The app reads connection profiles straight out of the SoftEther client, which means:
 
-- 以前用 `vpncmd` 或导入配置建过的账户，打开就能看到
-- 在这里新建 / 修改的配置，同样会出现在 `vpncmd` 和 `vpn-tracy` 里
-- 删除配置只删 SoftEther 的那一条，不碰虚拟网络适配器
+- Accounts created earlier with `vpncmd` or imported configs show up as soon as you open the app
+- Profiles created or edited here likewise appear in `vpncmd` and `vpn-tracy`
+- Deleting a profile removes only that SoftEther entry; virtual network adapters are left alone
 
-## 密码
+## Passwords
 
-密码只在保存那一刻交给 `vpncmd`，写入一个权限 0600 的临时文件后立刻删除；`settings.json` 里只有路由和界面偏好，没有密码。
+The password is handed to `vpncmd` only at the moment of saving, written to a temporary file with mode 0600 and deleted immediately afterwards; `settings.json` contains only routes and UI preferences — never passwords.
 
-## 开机自启动
+## Launch at login
 
-设置页的“开机自启动”注册的是桌面会话自启动（`~/.config/autostart`）。可以再勾选“启动应用后自动连接”，实现登录后自动上 VPN。
+"Launch at login" in Settings registers a desktop-session autostart entry (`~/.config/autostart`). Pair it with "Auto-connect after launch" to bring the VPN up automatically after login.
 
-## 界面风格
+## Interface style
 
-设置页最上面是“界面风格”：风格 1 是 Windows 11（Fluent 浅灰画布、方角控件、左侧强调指示条），
-风格 2 是 Deepin 25（大圆角卡片、蓝色实心导航胶囊、柔和投影）。点选即整页预览，
-确认后按“保存设置”写入 `settings.json` 的 `uiStyle`，下次启动沿用；不保存就离开会退回原来的风格。
+At the top of Settings sits "Interface style", with three looks to choose from:
 
-## 客户端服务生命周期
-
-SoftEther 的 Linux 客户端是 **root 常驻守护进程**（两个 `vpnclient execsvc` 进程），本身没有 systemd 单元。本应用可以托管它的启停：
-
-| 设置项 | 作用 |
+| Style | Look |
 |---|---|
-| 应用启动时一并启动客户端服务 | 打开应用时自动拉起 `vpnclient`（服务已在跑就跳过） |
-| 应用退出时停止客户端服务 | 关闭应用时停掉客户端 |
+| Style 1 · Windows 11 | Fluent light-gray canvas, square-cornered controls, accent indicator bar on the left |
+| Style 2 · Deepin 25 | Large-radius cards, solid blue navigation pills, soft shadows |
+| Style 3 · macOS | Traffic lights top-left (red/yellow/green), light-gray sidebar, solid blue rounded selection, very light shadows |
 
-两个都勾上 = **随应用开则开、关则关**。
+Clicking a style previews it across the whole page and writes `uiStyle` to `settings.json` automatically; it carries over to the next launch, and leaving the page also saves — there is no separate "Save" button. On first install the style is picked by distribution: Deepin-family gets Style 2, everything else Style 1.
 
-**只有「由本应用拉起」的客户端才会被退出时停止。** 应用真正启动客户端时会在
-`~/.config/softether-tray/client-managed.flag` 留一个标记；你自己在终端先开着的
-`vpnclient` 不会被应用关掉，避免误断别人的连接。手动点“停止服务”会同时清掉这个标记。
+## Client service lifecycle
 
-标记的判定是**「本次调用是否真的启动了客户端」**，不是「客户端现在是否在跑」。
-客户端是自守护的共享进程，用户可能先开着；如果按后者写标记，你手动开的隧道会在
-关掉应用时被一起断掉。所以启动路径（应用启动 / 点连接 / 点启动服务）都会先判断
-服务是否已在运行，已在运行就什么都不写。
+The SoftEther Linux client is a **long-running root daemon** (two `vpnclient execsvc` processes) with no systemd unit of its own. This app can manage its start and stop:
 
-停止服务走的是“先断开账户 → 清路由 → 停客户端”，所以不会留下让内网变黑洞的残留路由。
-如果应用被 `kill -9` 强杀，这段清理跑不到，重新打开应用停一次服务即可。
+| Setting | Effect |
+|---|---|
+| Start the client service when the app starts | Automatically brings up `vpnclient` when the app opens (skipped if the service is already running) |
+| Stop the client service when the app exits | Stops the client when the app closes |
 
-**退出时的授权等待有上限**：没装 sudoers 白名单时，停止客户端需要弹一次密码框。
-退出应用时最多等 20 秒，超时就带着仍在运行的客户端直接退出——退出是用户的明确意图，
-不该被一个密码框卡住。界面上手动点“停止服务”则有 120 秒，足够输入密码。
+Checking both = **the client follows the app: up with it, down with it**.
 
-托盘菜单的“退出”和界面里的“退出应用”走的是同一套收尾逻辑，行为一致。
+**Only a client started by this app gets stopped on exit.** When the app actually starts the client it leaves a flag at `~/.config/softether-tray/client-managed.flag`; a `vpnclient` you started yourself in a terminal is never stopped by the app, so nobody else's connection gets cut by accident. Clicking "Stop service" manually clears the flag as well.
 
-### 免密码启动（可选）
+The flag records **"did this call actually start the client"**, not "is the client running now". The client is a self-daemonizing shared process the user may already have started; writing the flag by the latter rule would take your manually started tunnel down together with the app. So every start path (app launch / clicking Connect / clicking Start service) first checks whether the service is already running and writes nothing if it is.
 
-有两种方案，**推荐 polkit**。
+Stopping the service runs "disconnect accounts → clear routes → stop the client", so it never leaves a stale route that turns the intranet into a black hole. If the app is force-killed with `kill -9`, that cleanup cannot run — just reopen the app and stop the service once.
 
-#### 方案 A：polkit 授权（推荐，粒度最细）
+**Authorization wait on exit is capped**: without the sudoers whitelist, stopping the client pops one password prompt. On exit the app waits at most 20 seconds, then quits leaving the client still running — quitting is an explicit user intent and should not hang on a password prompt. Clicking "Stop service" in the UI has 120 seconds, plenty of time to type a password.
+
+"Quit" in the tray menu and "Quit app" in the UI run the same teardown logic and behave identically.
+
+### Password-free startup (optional)
+
+Two approaches exist; **polkit is recommended**.
+
+#### Option A: polkit authorization (recommended, finest-grained)
 
 ```bash
-sudo bash Tools/install-polkit.sh            # 安装并启用免密
-sudo bash Tools/install-polkit.sh --no-auto  # 只装 policy，免密关闭（仍弹框）
-sudo bash Tools/install-polkit.sh --remove   # 完全卸载
+sudo bash Tools/install-polkit.sh            # install and enable password-free
+sudo bash Tools/install-polkit.sh --no-auto  # install the policy only, still prompts
+sudo bash Tools/install-polkit.sh --remove   # remove completely
 ```
 
-它做了三件事：
+It does three things:
 
-1. 把特权操作固化成一个**参数受限**的脚本 `/usr/libexec/softether-tray/softether-tray-net`
-2. 用 `cn.softether.tray.net.policy` 里的 `org.freedesktop.policykit.exec.path`
-   把 action **绑定到这一个路径**
-3. 用 `50-softether-tray.rules` 只对这条 action 放行 `YES`
+1. Fixes the privileged operations into one **argument-restricted** script `/usr/libexec/softether-tray/softether-tray-net`
+2. Uses `org.freedesktop.policykit.exec.path` in `cn.softether.tray.net.policy` to **bind the action to that single path**
+3. Uses `50-softether-tray.rules` to allow `YES` for that one action only
 
-于是连接、断开、启停客户端全部静默。而 `pkexec ip ...`、`pkexec bash`、`pkexec dnf ...`
-照样要密码 —— 这是它比 sudoers 白名单安全的地方。
+So connect, disconnect, and client start/stop all go through silently. Meanwhile `pkexec ip ...`, `pkexec bash`, `pkexec dnf ...` still demand a password — which is exactly what makes this safer than a sudoers whitelist.
 
-脚本自身的硬限制（改脚本前必读文件头）：
+Hard limits built into the script itself (read the file header before modifying it):
 
-| 限制 | 防的是什么 |
+| Limit | What it prevents |
 |---|---|
-| 网卡名必须 `vpn*` 前缀且存在于 `/sys/class/net` | 否则能拿它改 `eth0` 的地址 |
-| 网段必须是点分 IPv4 + `/0..32`，拒绝 `0.0.0.0/0` | 否则能被当成全流量劫持工具 |
-| MTU 限定 576..1500 | 防止把链路打死 |
-| 只接受 `connect`/`cleanup`/`vpnclient` 三个动作 | 不接受任意命令、不接受 shell 片段 |
-| 规则要求**本地活动会话** + `sudo`/`wheel` 组成员 | 远程 SSH、别人的会话仍要密码 |
+| Interface name must have the `vpn*` prefix and exist in `/sys/class/net` | Otherwise it could change `eth0`'s address |
+| Subnets must be dotted-quad IPv4 with `/0..32`; `0.0.0.0/0` is rejected | Otherwise it could be used to hijack all traffic |
+| MTU restricted to 576..1500 | Prevents killing the link |
+| Only the three actions `connect`/`cleanup`/`vpnclient` are accepted | No arbitrary commands, no shell fragments |
+| The rule requires a **local active session** + membership in `sudo`/`wheel` | Remote SSH and other people's sessions still need a password |
 
-#### 方案 B：sudoers 白名单
+#### Option B: sudoers whitelist
 
 ```bash
-sudo bash Tools/install-sudoers.sh          # 安装
-sudo bash Tools/install-sudoers.sh --remove # 卸载
+sudo bash Tools/install-sudoers.sh          # install
+sudo bash Tools/install-sudoers.sh --remove # remove
 ```
 
-只放开 `<客户端路径> start` / `stop` 两个命令组合，安装前用 `visudo -c` 校验。
-装好之后启停客户端走 `sudo -n` 静默通过。
+It opens up only the two command combinations `<client path> start` / `stop`, validated with `visudo -c` before installing. Afterwards client start/stop calls pass silently through `sudo -n`.
 
-⚠️ 但 sudoers 的白名单是**命令级**的：它放行的是"任何进程都能执行 `vpnclient stop`"，
-不像 polkit 方案那样连调用者会话都限定。两者可以只装一个；都装时 polkit 优先。
+⚠️ But the sudoers whitelist is **command-level**: it allows "any process may run `vpnclient stop`", unlike the polkit approach which restricts the calling session too. You can install just one of the two; if both are installed, polkit takes precedence.
 
-## 常见问题
+## Troubleshooting
 
-**状态一直显示“服务未启动”**
-点“启动服务”，或在终端执行 `vpn-tracy`。需要管理员权限时应用会弹密码框。
+**Status keeps showing "service not started"**
+Click "Start service", or run `vpn-tracy` in a terminal. The app pops a password prompt when administrator rights are needed.
 
-**装了 polkit 还是弹密码框**
-按顺序查：
+**Polkit is installed but the password prompt still appears**
+Check in this order:
 
-1. 确认 helper 到位：`ls -l /usr/libexec/softether-tray/softether-tray-net`（应为 755 root:root）
-2. 确认规则到位：`ls -l /etc/polkit-1/rules.d/50-softether-tray.rules`
-3. 确认 action 被 polkitd 认到：
+1. Confirm the helper is in place: `ls -l /usr/libexec/softether-tray/softether-tray-net` (should be 755 root:root)
+2. Confirm the rule is in place: `ls -l /etc/polkit-1/rules.d/50-softether-tray.rules`
+3. Confirm polkitd recognizes the action:
    ```bash
    busctl call org.freedesktop.PolicyKit1 /org/freedesktop/PolicyKit1/Authority \
      org.freedesktop.PolicyKit1.Authority EnumerateActions s "" | grep -c cn.softether.tray.net
    ```
-   返回 `0` 说明 policy 没被加载 —— 检查 policy 文件权限（须 0644 且所在目录 polkitd 可读）。
-4. 确认你在 `sudo` 组里：`id -nG | tr ' ' '\n' | grep -x sudo`
-5. 看规则有没有被 polkit 拒绝：`journalctl -u polkit -n 50 --no-pager`
-6. **注意**：如果 `/home/<你>` 的权限是 `drwxr-x---`（很多发行版默认如此），
-   polkitd 进不去用户目录，所以 `~/.config/polkit-1/` 下的配置**不生效**，
-   必须用 `sudo` 装到系统目录 —— 本安装脚本走的就是系统目录。
+   A `0` result means the policy was not loaded — check the policy file permissions (must be 0644, in a directory polkitd can read).
+4. Confirm you are in the `sudo` group: `id -nG | tr ' ' '\n' | grep -x sudo`
+5. See whether polkit rejected the rule: `journalctl -u polkit -n 50 --no-pager`
+6. **Note**: if `/home/<you>` has mode `drwxr-x---` (the default on many distributions), polkitd cannot enter the home directory, so anything under `~/.config/polkit-1/` **has no effect**; it must be installed with `sudo` into system directories — which is what this installer does.
 
-**连上了但内网不通**
-先看“设置 → 隧道与路由”里的网段列表。只有列表内的网段才会走 VPN；不在列表里的内网段要自己加。
+**Connected, but the intranet is unreachable**
+Look at the subnet list in "Settings → Tunnel & routes" first. Only subnets in the list go through the VPN; intranet subnets not in the list must be added yourself.
 
-**丢包、卡顿**
-先去“网络诊断”测目标地址，再用下面的顺序定位：
+**Packet loss, stutter**
+Test the target address in "Network diagnostics" first, then narrow it down in this order:
 
-1. 本地网关（`ip route` 里的默认网关）
-2. VPN 服务器外层地址（`getent ahostsv4 <服务器域名>`）
-3. 内网目标
+1. The local gateway (the default gateway in `ip route`)
+2. The VPN server's outer address (`getent ahostsv4 <server domain>`)
+3. The intranet target
 
-哪一层开始丢，问题就在哪一层。历史经验：UDP 加速异常时表现为 ICMP 稳定、TCP 建连极慢、客户端 CPU 打满，处理方式是关闭 UDP 加速。
+The layer where loss starts is where the problem is. Historical experience: a broken UDP acceleration shows up as stable ICMP, extremely slow TCP connects, and the client pegging a CPU core — the fix is to turn UDP acceleration off.
