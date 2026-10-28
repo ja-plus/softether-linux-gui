@@ -409,6 +409,30 @@ button.ghost:hover:not(:disabled) {
   color: var(--ghost-hover-fg);
 }
 
+/* 只放一个图标的小按钮：去掉左右内边距，做成正方形，
+   跟旁边带文字的按钮同高但不抢视觉宽度 */
+button.icon-only {
+  padding: 7px;
+  width: 34px;
+  justify-content: center;
+}
+
+/* 「启动服务」用绿色：它是让服务回到正常状态的动作，
+   和 red 的「停止服务」在颜色上直接区分开，不必读文字 */
+button.success {
+  background: var(--ok);
+  color: #fff;
+  border: 0.5px solid var(--ok);
+  border-radius: var(--radius-ctl);
+  padding: 7px 14px;
+  min-height: 34px;
+  box-shadow: var(--shadow-btn);
+}
+
+button.success:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
 button.danger {
   background: transparent;
   color: var(--danger);
@@ -424,6 +448,7 @@ button.danger:hover:not(:disabled) {
 
 button.ghost:disabled,
 button.danger:disabled,
+button.success:disabled,
 button.primary:disabled {
   opacity: 0.45;
   cursor: default;
@@ -465,8 +490,83 @@ input:focus {
   align-items: center;
 }
 
+/* ── 页面外壳（设置 / 客户端 / 适配器三页共用）────────────────────────
+   这三页长得一样：整页只有卡片在滚，底部可能挂一条自动保存状态栏。
+   放全局是因为以前这套样式只存在于 SettingsTab 的 scoped 里，
+   搬出两张卡片后另外两页要复用，各自抄一份必然漂移。 */
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.pane-scroll {
+  flex: 1;
+  min-height: 0;
+  padding: 18px 20px 24px;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  gap: 12px;
+}
+
+/* 状态栏独立于滚动区，始终固定在页面底部 */
+.pane-foot {
+  flex: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 20px 10px;
+  background: var(--bg);
+  border-top: 0.5px solid var(--line);
+}
+
+.pane-foot button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.auto-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-hint);
+}
+
+.auto-status.saving {
+  color: var(--text-soft);
+}
+
+.auto-status.saving .dot {
+  animation: status-pulse 1s ease-in-out infinite;
+}
+
+.auto-status.saved {
+  color: var(--ok);
+}
+
+.auto-status.blocked {
+  color: var(--warn);
+}
+
+.auto-status.error {
+  color: var(--danger);
+}
+
+@keyframes status-pulse {
+  50% {
+    opacity: 0.2;
+  }
+}
+
 /* ── 设置页卡片的通用骨架 ────────────────────────────────────────────
-   这几条被六张设置卡片共用。放在全局而不是某个组件的 scoped 里：
+   这几条被所有设置卡片共用（设置页四张 + 客户端页 / 适配器页各一张）。
+   放在全局而不是某个组件的 scoped 里：
    scoped 样式不会作用到子组件内部，拆卡后各卡片会一起掉样式。 */
 
 /* 卡片内边距 + 纵向堆叠：.card 只管外观，.block 管排布 */
@@ -601,54 +701,160 @@ input:focus {
   border-bottom: var(--tab-indicator);
 }
 
-.overlay {
-  position: absolute;
-  inset: 0;
+/* ── Arco 组件的皮肤适配 ────────────────────────────────────────────────
+   弹窗（Modal）、按钮、悬浮提示（Tooltip）、轻提示（Message）走 Arco，
+   但配色必须吃上面的皮肤 token：这里只写一份映射，三套皮肤的取值
+   由 data-style 切换自动跟上。 */
+
+.arco-modal {
+  background: var(--panel);
+  border: 0.5px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-dialog);
+  font-family: var(--font);
+}
+
+.arco-modal-mask {
   background: var(--overlay-bg);
   backdrop-filter: var(--overlay-blur);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  z-index: 20;
 }
 
-.dialog {
-  background: var(--panel);
-  border-radius: var(--radius);
-  border: 0.5px solid var(--line);
-  box-shadow: var(--shadow-dialog);
-  width: 100%;
-  max-width: 520px;
-  max-height: 100%;
-  padding: 10px 0px;
-  display: flex;
-  flex-direction: column;
+.arco-modal-header {
+  border-bottom-color: var(--line);
 }
 
-.dialog header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 6px;
-  padding: 0 20px;
+.arco-modal-title {
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  font-weight: 500;
 }
 
-.toast {
-  position: absolute;
-  bottom: 18px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: var(--text);
+.arco-modal-body {
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+}
+
+.arco-modal-footer {
+  border-top-color: var(--line);
+}
+
+.arco-modal-close-btn {
+  color: var(--text-soft);
+}
+
+.arco-modal-close-btn:hover {
+  background: var(--ghost-hover-bg);
+  color: var(--text);
+}
+
+/* 按钮：外观对齐应用自己的 button.primary / button.ghost */
+.arco-btn {
+  border-radius: var(--radius-ctl);
+  font-family: var(--font);
+  font-size: 13px;
+}
+
+.arco-btn-primary,
+.arco-btn-primary[type='button'] {
+  background: var(--accent);
+  border-color: var(--accent);
   color: #fff;
-  border-radius: var(--toast-radius);
-  padding: 8px 14px;
-  font-size: 12px;
-  max-width: 80%;
-  z-index: 30;
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.18);
 }
 
-.toast.error {
+.arco-btn-primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  color: #fff;
+}
+
+.arco-btn-primary:active {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  color: #fff;
+}
+
+/* 危险确认的确定按钮：会中断当前动作的操作都该是红的 */
+.arco-btn-primary.arco-btn-status-danger {
   background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.arco-btn-primary.arco-btn-status-danger:hover {
+  background: var(--danger);
+  border-color: var(--danger);
+  filter: brightness(1.08);
+}
+
+.arco-btn-secondary {
+  background: transparent;
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+.arco-btn-secondary:hover {
+  background: var(--ghost-hover-bg);
+  border-color: var(--ghost-hover-border);
+  color: var(--ghost-hover-fg);
+}
+
+.arco-btn-disabled,
+.arco-btn-disabled:hover {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* 禁用态只降透明度、不换底色（对齐应用里 button:disabled 的处理），
+   否则 Arco 会把按钮底色换成灰蓝 */
+.arco-btn-primary.arco-btn-disabled,
+.arco-btn-primary.arco-btn-disabled:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.arco-btn-primary.arco-btn-status-danger.arco-btn-disabled,
+.arco-btn-primary.arco-btn-status-danger.arco-btn-disabled:hover {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+.arco-btn-secondary.arco-btn-disabled,
+.arco-btn-secondary.arco-btn-disabled:hover {
+  background: transparent;
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+/* 悬浮提示：深底浅字，跟皮肤的文字色走 */
+.arco-tooltip-content {
+  background: var(--text);
+  color: var(--panel);
+  border-radius: var(--radius-ctl);
+  font-family: var(--font);
+}
+
+/* 轻提示（toast） */
+.arco-message {
+  background: var(--panel);
+  border-color: var(--line);
+  border-radius: var(--toast-radius);
+  box-shadow: var(--shadow-pop);
+  font-family: var(--font);
+}
+
+.arco-message .arco-message-content {
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+}
+
+.arco-message-success .arco-message-icon {
+  color: var(--ok);
+}
+
+.arco-message-error .arco-message-icon {
+  color: var(--danger);
 }

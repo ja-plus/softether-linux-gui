@@ -212,7 +212,19 @@ impl Settings {
         let mut loaded: Self = serde_json::from_str(&text).unwrap_or_default();
         loaded.normalize_ui_style();
         loaded.normalize_locale();
+        loaded.normalize_client_choice();
         loaded
+    }
+
+    /// 归一化副本：治愈手改坏的风格、语言与「来源 + 目录」。
+    ///
+    /// 进内存和写盘前都过一遍，界面读到的永远是自洽的一份。
+    pub fn normalized(&self) -> Self {
+        let mut out = self.clone();
+        out.normalize_ui_style();
+        out.normalize_locale();
+        out.normalize_client_choice();
+        out
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -226,10 +238,8 @@ impl Settings {
         })?;
         let path = settings_path();
         let tmp = path.with_extension("json.tmp");
-        // 写回前顺手治愈手改坏的风格与语言取值，避免垃圾值一直留在文件里
-        let mut normalized = self.clone();
-        normalized.normalize_ui_style();
-        normalized.normalize_locale();
+        // 写回前顺手治愈手改坏的取值，避免垃圾值一直留在文件里
+        let normalized = self.normalized();
         let text = serde_json::to_string_pretty(&normalized).map_err(|e| e.to_string())?;
         {
             let mut file = fs::File::create(&tmp).map_err(|e| {
@@ -261,6 +271,34 @@ impl Settings {
     fn normalize_locale(&mut self) {
         if self.locale != "en" {
             self.locale = default_locale();
+        }
+    }
+
+    /// 把「来源 + 目录」收敛成自洽的一对。
+    ///
+    /// 1. 路径就是内置客户端目录时一律归成「内置」：用户在「自己指定」里填
+    ///    内置目录很常见，照原样存下来，下次打开界面显示"自己指定"、实际
+    ///    跑的却是内置客户端，两边对不上（真踩过）。
+    /// 2. 来源是无法识别的字符串时按内置处理，和解析处的降级一致——否则
+    ///    界面一张卡片都选不中，只剩「自己指定」的输入框露在外面。
+    ///
+    /// 归成内置时 `vpn_dir` 一并清掉：内置不看路径，留着只会被下一次
+    /// 「自己指定」当成起点。**来源整个没写**的老配置原样保留，别顺手
+    /// 抹掉用户手工填过的路径。
+    fn normalize_client_choice(&mut self) {
+        let source = self.client_source.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let Some(source) = source else { return };
+        let dir = self.vpn_dir.as_deref().unwrap_or("");
+        let use_builtin = match crate::client_dir::ClientSource::parse(source) {
+            // 写坏的来源按内置处理（解析处也是这么降级的）
+            None => true,
+            Some(crate::client_dir::ClientSource::Bundled) => true,
+            // 「自己指定」/「搜索到的」但路径就是内置目录：归成内置
+            Some(_) => crate::client_dir::is_bundled_dir(dir),
+        };
+        if use_builtin {
+            self.client_source = Some("bundled".to_string());
+            self.vpn_dir = None;
         }
     }
 }
@@ -347,6 +385,66 @@ pub struct VpncmdOutput {
 }
 
 pub fn vpncmd(settings: &Settings, auth: VpncmdAuth, args: &[&str]) -> Result<VpncmdOutput, String> {
+    let mut command = build_vpncmd(settings, auth, args)?;
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let output = command.output().map_err(|e| {
+        crate::i18n::tr(
+            &format!("执行 vpncmd 失败: {e}"),
+            &format!("Failed to run vpncmd: {e}"),
+        )
+        .to_string()
+    })?;
+    Ok(collect_output(output))
+}
+
+/// 同 `vpncmd`，但把 `input` 从 stdin 喂给 vpncmd 的交互提示。
+///
+/// 用途只有一个：`AccountPasswordSet` **不传** `/PASSWORD` 时会从终端读两次
+/// （「密码」+「确认输入」各一行），这是让密码既保存、又不进 argv、
+/// 不落临时文件的途径。直接传 `/PASSWORD:<值>` 是把值**原样**当密码——
+/// 以前传临时文件路径，存下的密码就是那个路径字符串，认证必然失败。
+///
+/// **注意**：交互提示（SoftEther 的 `PasswordPrompt`）只接受 0x20-0x7E 的
+/// 可打印 ASCII、缓冲 64 字节，非 ASCII 会被静默丢弃、超长会被截断。
+/// 含中文/全角或超长的密码不能走这条路径，由 `accounts::save_account`
+/// 改为本地算哈希直接写配置文件（见 `sha0.rs`）。
+pub fn vpncmd_with_input(
+    settings: &Settings,
+    auth: VpncmdAuth,
+    args: &[&str],
+    input: &str,
+) -> Result<VpncmdOutput, String> {
+    let mut command = build_vpncmd(settings, auth, args)?;
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|e| {
+        crate::i18n::tr(
+            &format!("执行 vpncmd 失败: {e}"),
+            &format!("Failed to run vpncmd: {e}"),
+        )
+        .to_string()
+    })?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(input.as_bytes()).map_err(|e| {
+            crate::i18n::tr(
+                &format!("向 vpncmd 写入输入失败: {e}"),
+                &format!("Failed to write to vpncmd stdin: {e}"),
+            )
+            .to_string()
+        })?;
+        // drop(stdin) 关闭管道，vpncmd 才读得到 EOF 之后的收尾
+    }
+    let output = child.wait_with_output().map_err(|e| {
+        crate::i18n::tr(
+            &format!("执行 vpncmd 失败: {e}"),
+            &format!("Failed to run vpncmd: {e}"),
+        )
+        .to_string()
+    })?;
+    Ok(collect_output(output))
+}
+
+/// 组装 vpncmd 命令行（两种调用方式共用），stdin/输出由调用方接管。
+fn build_vpncmd(settings: &Settings, auth: VpncmdAuth, args: &[&str]) -> Result<Command, String> {
     let binary = vpncmd_path(settings).ok_or_else(|| {
         crate::i18n::tr(
             "找不到 vpncmd，请在设置里指定 SoftEther VPN Client 目录",
@@ -379,24 +477,19 @@ pub fn vpncmd(settings: &Settings, auth: VpncmdAuth, args: &[&str]) -> Result<Vp
         // 注意：**输出语言的开关是客户端目录下的 lang.config，不是这两个变量**。
         // 解析层已做成中/英/日三语兼容，这里只是保证中文不乱码。
         .env("LC_ALL", "zh_CN.UTF-8")
-        .env("LANG", "zh_CN.UTF-8")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let output = command.output().map_err(|e| {
-        crate::i18n::tr(
-            &format!("执行 vpncmd 失败: {e}"),
-            &format!("Failed to run vpncmd: {e}"),
-        )
-        .to_string()
-    })?;
+        .env("LANG", "zh_CN.UTF-8");
+    Ok(command)
+}
+
+/// stdout 优先、stderr 追加，退出码一并带出。
+fn collect_output(output: std::process::Output) -> VpncmdOutput {
     let mut text = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !stderr.trim().is_empty() {
         text.push('\n');
         text.push_str(&stderr);
     }
-    Ok(VpncmdOutput { stdout: text, code: output.status.code().unwrap_or(-1) })
+    VpncmdOutput { stdout: text, code: output.status.code().unwrap_or(-1) }
 }
 
 pub fn validate_subnet(value: &str) -> Result<(), String> {
@@ -596,13 +689,54 @@ pub fn run_helper_with_timeout(args: &[&str], wait_seconds: Option<u64>) -> Resu
     Err(match (code, crate::i18n::is_en()) {
         (Some(3), false) => format!("无法确定虚拟网卡的隧道网关，路由未下发（{detail}）"),
         (Some(3), true) => format!("Cannot determine the tunnel gateway; routes were not installed ({detail})"),
+        (Some(6), false) => format!(
+            "虚拟网卡没有 IPv4 地址，无法推导隧道网关（{detail}）。\
+             DHCP 没要来地址：请确认服务端 HUB 启用了「虚拟 DHCP 服务器」，或给网卡配静态地址"
+        ),
+        (Some(6), true) => format!(
+            "The virtual adapter has no IPv4 address, so no tunnel gateway can be derived ({detail}). \
+             DHCP did not deliver a lease: enable the Virtual DHCP Server on the server HUB, or assign a static address."
+        ),
         (Some(4), false) => format!("系统没有 dhclient/dhcpcd，网卡拿不到地址（{detail}）"),
         (Some(4), true) => format!("No dhclient/dhcpcd is available, so the interface cannot get an address ({detail})"),
-        (Some(126) | Some(127), false) => format!("已取消授权（{detail}）"),
-        (Some(126) | Some(127), true) => format!("Authorization cancelled ({detail})"),
+        // 126/127 有两种成因：用户在框里点了取消，或者压根没有认证代理把框弹出来。
+        // 后者在轻量桌面/无桌面会话里很常见，报"已取消授权"会让人以为是自己的锅。
+        (Some(code), _) if NOT_AUTHORIZED.contains(&code) => explain_not_authorized(&detail),
         (_, false) => format!("特权操作失败: {}", if detail.is_empty() { "未知原因".into() } else { detail }),
         (_, true) => format!("Privileged operation failed: {}", if detail.is_empty() { "unknown reason".into() } else { detail }),
     })
+}
+
+/// pkexec 的两个"没拿到授权"退出码：126 = 认证失败/被取消，127 = 找不到授权程序。
+pub const NOT_AUTHORIZED: &[i32] = &[126, 127];
+
+/// 没拿到授权时给用户看的说明。
+///
+/// 这两种退出码要分开想：126 多数是用户点了取消，127 基本是现场根本没有认证代理
+/// 把框弹出来。统一报"已取消授权"会把人引向错误的方向（去翻自己的密码），
+/// 所以这里明确点出"框可能压根没出现"，并给出根治办法。
+pub fn explain_not_authorized(detail: &str) -> String {
+    let detail = detail.trim();
+    if crate::i18n::is_en() {
+        format!(
+            "This action needs administrator authorization, but no authorization dialog appeared{}. Install the privileged helper (Tools/install-polkit.sh) or the sudoers allowlist, or make sure a polkit authentication agent is running.",
+            if detail.is_empty() { String::new() } else { format!(" ({detail})") }
+        )
+    } else {
+        format!(
+            "这个操作需要管理员授权，但授权窗口没有出现{details}。请安装特权助手（Tools/install-polkit.sh）或 sudoers 白名单，或确认系统里有 polkit 认证代理在运行。",
+            details = if detail.is_empty() { String::new() } else { format!("（{detail}）") }
+        )
+    }
+}
+
+/// 这条错误信息是不是"授权没拿到"。
+///
+/// 只认我们自己拼出来的那两句开头：退出码在 `run_helper_with_timeout` 里就被
+/// 翻译成句子了，往上再走一层已经看不到 code，只能靠文案回认。
+pub fn looks_like_not_authorized(message: &str) -> bool {
+    message.starts_with("这个操作需要管理员授权")
+        || message.starts_with("This action needs administrator authorization")
 }
 
 pub fn interface_mtu(iface: &str) -> Option<u16> {
@@ -614,6 +748,28 @@ pub fn interface_ipv4(iface: &str) -> Option<String> {
     let output = Command::new("ip").args(["-4", "-o", "addr", "show", "dev", iface]).output().ok()?;
     let text = String::from_utf8_lossy(&output.stdout);
     text.split_whitespace().skip_while(|token| *token != "inet").nth(1).map(|s| s.to_string())
+}
+
+/// 一次问出所有带 IPv4 的网卡。
+///
+/// 挑虚拟网卡时要判断"哪块真有地址"，按网卡逐个调 `interface_ipv4` 就是 N 次
+/// fork，而这条路每 2 秒走一遍轮询。一次 `ip -4 -o addr show` 全问清楚。
+pub fn interfaces_with_ipv4() -> Vec<String> {
+    let Ok(output) = Command::new("ip").args(["-4", "-o", "addr", "show"]).output() else {
+        return Vec::new();
+    };
+    parse_interfaces_with_ipv4(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// `interfaces_with_ipv4` 的解析层，单拎出来可测。
+///
+/// 行形态：`58: vpn_vpn    inet 192.168.50.24/24 brd ...`——网卡名是第二个字段。
+fn parse_interfaces_with_ipv4(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter(|line| line.contains(" inet "))
+        .filter_map(|line| line.split_whitespace().nth(1).map(str::to_string))
+        .collect()
 }
 
 /// 隧道网段的第一跳：`192.168.50.19/24` → `192.168.50.1`。
@@ -713,13 +869,26 @@ pub fn connect_routes_script(
         }
     }
 
-    // 网关 = 网卡上 proto kernel 那条网段路由的第一跳（192.168.50.19/24 → 192.168.50.1）。
-    // 推导放进脚本里，才能和 DHCP 共用同一次提权。
+    // 没地址就别推网关：这两件事要分开报（helper 里是同一套判定）。
+    lines.push(format!(
+        "if ! ip -4 -o addr show dev {iface} | grep -q ' inet '; then echo 'NO_ADDRESS' >&2; exit 6; fi"
+    ));
+    // 网关 = 网卡的第一跳。推导放在脚本里，才能和 DHCP 共用同一次提权。
+    //
+    // 三来源从最可靠往最猜的排：默认路由的 via（服务端 DHCP 的 routers 选项）
+    // → 点对点网卡的 peer 地址 → `proto kernel` 网段路由的主机位改 1
+    //   （192.168.50.24/24 → 192.168.50.1，静态地址环境下只有它可用）。
     //
     // 注意 awk 里 `OFS` 必须在 `BEGIN` 设好：写在动作里（`$4=1; OFS="."; print`）时，
     // 字段已经按 `-F.` 拆完、打印用的仍是旧分隔符，输出会是 `192 168 50 1` 而不是点分地址。
     lines.push(format!(
-        "GW=$(ip -4 route show dev {iface} | awk '/proto kernel/ && / src / {{print $1; exit}}' | cut -d/ -f1 | awk -F. 'BEGIN{{OFS=\".\"}} NF==4{{$4=1; print}}')"
+        "GW=$(ip -4 route show default dev {iface} 2>/dev/null | awk '/via/ {{for (i = 1; i <= NF; i++) if ($i == \"via\") {{print $(i + 1); exit}}}}')"
+    ));
+    lines.push(format!(
+        "if [ -z \"$GW\" ]; then GW=$(ip -4 -o addr show dev {iface} 2>/dev/null | awk '{{for (i = 1; i <= NF; i++) if ($i == \"peer\") {{v = $(i + 1); sub(/\\/.*/, \"\", v); print v; exit}}}}'); fi"
+    ));
+    lines.push(format!(
+        "if [ -z \"$GW\" ]; then GW=$(ip -4 route show dev {iface} | awk '/proto kernel/ && / src / {{print $1; exit}}' | cut -d/ -f1 | awk -F. 'BEGIN{{OFS=\".\"}} NF==4{{$4=1; print}}'); fi"
     ));
     lines.push(
         "if [ -z \"$GW\" ]; then echo 'NO_GATEWAY' >&2; exit 3; fi".to_string(),
@@ -863,8 +1032,7 @@ mod tests {
     }
 
     #[test]
-    fn connect_script_rejects_bad_iface() {
-        let cfg = RouteConfig::default();
+    fn connect_script_rejects_bad_iface() {        let cfg = RouteConfig::default();
         assert!(connect_routes_script("vpn; rm -rf /", &cfg, false).is_err());
         assert!(connect_routes_script("", &cfg, false).is_err());
     }
@@ -893,6 +1061,42 @@ mod tests {
         // 网卡还没地址（没有 proto kernel 网段路由）时不许瞎猜，返回 None 让用户自己填。
         assert_eq!(parse_interface_gateway("default via 192.168.1.1 dev wlp0s20f3\n"), None);
         assert_eq!(parse_interface_gateway(""), None);
+    }
+
+    #[test]
+    fn connect_script_reports_missing_address_before_gateway() {
+        // 没有 IPv4 时网关必然推不出来。必须先报 NO_ADDRESS——
+        // 报 NO_GATEWAY 会把人引去翻路由表，而问题其实在"网卡没 IP"。
+        let cfg = RouteConfig::default();
+        let script = connect_routes_script("vpn_vpn", &cfg, true).unwrap();
+        assert!(script.contains("NO_ADDRESS"), "缺地址要单独报出来");
+        assert!(script.contains("exit 6"), "缺地址用退出码 6，别和 3（推不出网关）混在一起");
+        let addr_check = script.find("NO_ADDRESS").expect("缺地址判定必须在脚本里");
+        let gateway_check = script.find("NO_GATEWAY").expect("缺网关判定必须在脚本里");
+        assert!(addr_check < gateway_check, "缺地址的判定要排在网关推导之前");
+    }
+
+    #[test]
+    fn connect_script_tries_default_route_gateway_first() {
+        // 服务端 DHCP 的 routers 选项最终落成默认路由，是最权威的网关来源；
+        // 只有拿不到时才退回 "proto kernel 网段主机位改 1" 那条老规则。
+        let cfg = RouteConfig::default();
+        let script = connect_routes_script("vpn_vpn", &cfg, false).unwrap();
+        let default_route = script.find("route show default dev vpn_vpn").expect("要读默认路由的 via");
+        let kernel_route = script.find("/proto kernel/").expect("要保留 proto kernel 兜底");
+        assert!(default_route < kernel_route, "默认路由优先于猜测");
+    }
+
+    #[test]
+    fn interfaces_with_ipv4_parses_ip_output() {
+        // `ip -4 -o addr show` 的真实形态：网卡名是第二个字段
+        let output = "1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever\n\
+                      58: vpn_vpn    inet 192.168.50.24/24 brd 192.168.50.255 scope global vpn_vpn\n\
+                      57: vpn_tet-test: <BROADCAST,MULTICAST,UP> mtu 1500\n";
+        assert_eq!(
+            parse_interfaces_with_ipv4(output),
+            ["lo".to_string(), "vpn_vpn".to_string()].to_vec()
+        );
     }
 
     #[test]
@@ -1054,5 +1258,52 @@ mod tests {
         settings.locale = "fr".into();
         settings.normalize_locale();
         assert_eq!(settings.locale, "zh");
+    }
+
+    #[test]
+    fn custom_pointing_at_bundled_dir_becomes_bundled() {
+        // 「自己指定」填的是内置目录（带不带结尾斜杠都一样）：下次打开必须
+        // 显示「内置客户端」，否则界面说自定义、实际跑的是内置那份。
+        for dir in [BUNDLED_CLIENT_DIR.to_string(), format!("{BUNDLED_CLIENT_DIR}/")] {
+            let mut settings = Settings::default();
+            settings.client_source = Some("custom".into());
+            settings.vpn_dir = Some(dir);
+            settings.normalize_client_choice();
+            assert_eq!(settings.client_source.as_deref(), Some("bundled"));
+            assert!(settings.vpn_dir.is_none(), "内置不看路径，要一并清掉");
+        }
+        // 「搜索到的」指向内置目录同样归成内置
+        let mut detected = Settings::default();
+        detected.client_source = Some("detected".into());
+        detected.vpn_dir = Some(BUNDLED_CLIENT_DIR.to_string());
+        detected.normalize_client_choice();
+        assert_eq!(detected.client_source.as_deref(), Some("bundled"));
+    }
+
+    #[test]
+    fn client_choice_keeps_real_custom_and_legacy_configs() {
+        // 真·自己指定不动
+        let mut custom = Settings::default();
+        custom.client_source = Some("custom".into());
+        custom.vpn_dir = Some("/opt/my-vpnclient".into());
+        custom.normalize_client_choice();
+        assert_eq!(custom.client_source.as_deref(), Some("custom"));
+        assert_eq!(custom.vpn_dir.as_deref(), Some("/opt/my-vpnclient"));
+
+        // 写坏的来源按内置处理，别让界面一张卡片都选不中
+        let mut broken = Settings::default();
+        broken.client_source = Some("whatever".into());
+        broken.vpn_dir = Some("/opt/my-vpnclient".into());
+        broken.normalize_client_choice();
+        assert_eq!(broken.client_source.as_deref(), Some("bundled"));
+        assert!(broken.vpn_dir.is_none());
+
+        // 来源整个没写的老配置：原样保留，别抹掉手工填过的路径
+        let mut legacy = Settings::default();
+        legacy.client_source = None;
+        legacy.vpn_dir = Some("/opt/my-vpnclient".into());
+        legacy.normalize_client_choice();
+        assert!(legacy.client_source.is_none());
+        assert_eq!(legacy.vpn_dir.as_deref(), Some("/opt/my-vpnclient"));
     }
 }

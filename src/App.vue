@@ -1,18 +1,29 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { listen } from '@tauri-apps/api/event'
-import { Activity, Layers, LayoutList, LogOut, Plug, Settings as SettingsIcon } from 'lucide-vue-next'
+import {
+  Activity,
+  EthernetPort,
+  Layers,
+  LayoutList,
+  LogOut,
+  Package,
+  Plug,
+  Settings as SettingsIcon,
+} from 'lucide-vue-next'
 import OverviewTab from './components/OverviewTab.vue'
 import ProfilesTab from './components/ProfilesTab.vue'
 import DiagnosticsTab from './components/DiagnosticsTab.vue'
+import ClientTab from './components/ClientTab.vue'
+import NicTab from './components/NicTab.vue'
 import SettingsTab from './components/SettingsTab.vue'
 import TitleBar from './components/TitleBar.vue'
 import ResizeEdges from './components/ResizeEdges.vue'
-import { bootstrap, overview, toast } from './lib/api'
+import { bootstrap, overview } from './lib/api'
 import { t } from './lib/i18n'
 import { invoke } from '@tauri-apps/api/core'
 
-const tab = ref<'overview' | 'profiles' | 'diag' | 'settings'>('overview')
+const tab = ref<'overview' | 'profiles' | 'diag' | 'client' | 'nic' | 'settings'>('overview')
 const ready = ref(false)
 
 onMounted(async () => {
@@ -56,6 +67,14 @@ async function quit() {
           <button :class="{ active: tab === 'diag' }" @click="tab = 'diag'">
             <Activity :size="15" /> {{ t('app.nav.diag') }}
           </button>
+          <!-- 客户端与适配器原来是「设置」里的两张卡：一个是"用哪份 vpnclient"、
+               一个是"隧道绑哪块网卡"，都属于运行环境，不属于偏好，单独成页 -->
+          <button :class="{ active: tab === 'client' }" @click="tab = 'client'">
+            <Package :size="15" /> {{ t('app.nav.client') }}
+          </button>
+          <button :class="{ active: tab === 'nic' }" @click="tab = 'nic'">
+            <EthernetPort :size="15" /> {{ t('app.nav.nic') }}
+          </button>
           <button :class="{ active: tab === 'settings' }" @click="tab = 'settings'">
             <SettingsIcon :size="15" /> {{ t('app.nav.settings') }}
           </button>
@@ -69,10 +88,10 @@ async function quit() {
         <OverviewTab v-if="ready && tab === 'overview'" />
         <ProfilesTab v-else-if="ready && tab === 'profiles'" />
         <DiagnosticsTab v-else-if="ready && tab === 'diag'" />
+        <ClientTab v-else-if="ready && tab === 'client'" />
+        <NicTab v-else-if="ready && tab === 'nic'" />
         <SettingsTab v-else-if="ready && tab === 'settings'" />
       </main>
-
-      <div v-if="toast" class="toast" :class="{ error: toast.error }">{{ toast.text }}</div>
     </div>
     <ResizeEdges />
   </div>

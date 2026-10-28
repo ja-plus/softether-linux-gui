@@ -1,22 +1,30 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { RefreshCw, PlugZap, Power } from 'lucide-vue-next'
+import { invoke } from '@tauri-apps/api/core'
+import { ArrowRightLeft, Loader2, Plus, RefreshCw, PlugZap, Power } from 'lucide-vue-next'
 import DisconnectIcon from './DisconnectIcon.vue'
+import { confirmDialog } from '../lib/dialog'
 import SelectInput, { type SelectOption } from './SelectInput.vue'
 import Sparkline from './Sparkline.vue'
 import {
   busy,
+  busyText,
   connectAccount,
   disconnectAccount,
+  findSourceWithAccounts,
   formatBytes,
   formatRate,
+  isAccountConnecting,
   isYes,
   localizeFlag,
   overview,
   refresh,
   settings,
+  showToast,
   startService,
-  stopService,
+  switchClientDir,
+  type AccountSource,
+  type NicInfo,
 } from '../lib/api'
 import { t, locale } from '../lib/i18n'
 
@@ -38,7 +46,128 @@ let previous: { at: number; rx: number; tx: number } | null = null
 let polling = false
 
 const snapshot = computed(() => overview.value?.snapshot ?? null)
+/** 启停服务进行中。两个按钮共用同一份忙碌标记，图标转圈即可 */
+const serviceBusy = computed(() => busy.value === 'service')
+
+/**
+ * 圆按钮为什么点不了。空串表示可以点。
+ *
+ * 按钮置灰时必须说清原因，否则用户只知道"点不动"，不知道该去启动服务
+ * 还是先去建配置。
+ */
+const connectBlockedReason = computed(() => {
+  if (!overview.value) return ''
+  if (!overview.value.serviceRunning) return t('overview.connectNeedsService')
+  if (!accounts.value.length) return t('overview.connectNeedsProfile')
+  if (!selectedName.value) return t('overview.connectNeedsSelection')
+  return ''
+})
+
+/**
+ * 置灰用的内联样式。
+ *
+ * 写成内联而不是只靠 `:disabled` 选择器：主题（win11/deepin/mac）里可能有
+ * 更具体的选择器重新给背景上色，光靠样式表会被悄悄压掉——按钮看着还是能点。
+ * 内联样式是最高的那一层，主题换色也压不动它。
+ */
+const blockedStyle = computed(() =>
+  connectBlockedReason.value
+    ? {
+        background: 'linear-gradient(145deg, var(--line-strong), var(--line))',
+        color: 'var(--text-soft)',
+        boxShadow: 'none',
+        cursor: 'default',
+      }
+    : undefined,
+)
+
+/**
+ * 另一个客户端目录里找到的账号（仅在没有可选账号时才去查）。
+ *
+ * 账号是跟着客户端目录走的：用户把来源切到内置之后，自己装的那份里的
+ * 配置不会跟过来。这里把"账号在哪"直接摆到界面上，并给一键切过去。
+ */
+const otherSource = ref<AccountSource | null>(null)
+
+/**
+ * 点击切换。服务在跑的时候先问一句再动手——切换会停掉当前服务，
+ * 正在连着的隧道会断，这个动作不能默默发生。
+ *
+ * 来源要按那份客户端的实际情况回传：不传的话后端只能猜，
+ * 猜成"自己指定"就会把内置客户端的来源写错。
+ */
+async function askSwitch(target: AccountSource) {
+  if (overview.value?.serviceRunning) {
+    const ok = await confirmDialog({
+      title: t('overview.switchTitle'),
+      body: t('overview.switchBody'),
+      confirmText: t('overview.switchConfirm'),
+      danger: true,
+    })
+    if (!ok) return
+  }
+  void switchClientDir(target.dir, target.source)
+}
+
+async function loadOtherSource() {
+  // 不看服务是否在跑：停了之后仍要能告诉用户"账号在哪个目录里"，
+  // 那正是切换的唯一时机
+  if (accounts.value.length) {
+    otherSource.value = null
+    return
+  }
+  try {
+    otherSource.value = await findSourceWithAccounts()
+  } catch {
+    // 拿不到就退回纯文案提示，不足以打断页面
+    otherSource.value = null
+  }
+}
+
+// 声明必须在下面 watch 之前：watch 的 getter 会立刻执行一次，
+// 先跑 watch 再声明 accounts 会撞上 TDZ，整个组件首帧就抛错白屏
 const accounts = computed(() => overview.value?.accounts ?? [])
+
+// immediate：首屏就可能是"服务在跑 + 没有账号"，那时没有任何状态变化会
+// 触发上面这个 watch，不主动查一次就一直空着
+watch(
+  () => [overview.value?.serviceRunning, accounts.value.length] as const,
+  () => void loadOtherSource(),
+  { immediate: true },
+)
+
+const nics = computed(() => overview.value?.nics ?? [])
+
+/**
+ * 客户端跑着、但一块虚拟网卡都没有。
+ *
+ * 为什么必须带上 `serviceRunning`：后端只在 `vpncmd_ready && running` 时才读
+ * 清单（`vpn.rs:304`），停服期间 nics 恒为空。少了这个条件，停服那一刻会
+ * 冒出"没有网卡"的引导，用户点了也建不成——vpncmd 根本没有客户端可连。
+ */
+const noNic = computed(
+  () => !!overview.value?.serviceRunning && !!overview.value?.vpncmdReady && nics.value.length === 0,
+)
+
+/** 建网卡时的默认名。这是系统接口名，不跟随界面语言。 */
+const DEFAULT_NIC_NAME = 'VPN'
+const creatingNic = ref(false)
+
+async function createDefaultNic() {
+  if (creatingNic.value) return
+  creatingNic.value = true
+  try {
+    const list = await invoke<NicInfo[]>('create_nic', { name: DEFAULT_NIC_NAME })
+    // 只换 nics 字段：overview 里还有服务状态、路由等，整体覆盖会闪一下
+    if (overview.value) overview.value = { ...overview.value, nics: list }
+    showToast(t('nic.created', { name: DEFAULT_NIC_NAME }))
+  } catch (error) {
+    showToast(String(error), true)
+  } finally {
+    creatingNic.value = false
+  }
+}
+
 const currentRate = computed(() => rates.value[rates.value.length - 1] ?? { rx: 0, tx: 0 })
 const elapsed = computed(() => {
   const since = snapshot.value?.connectedSince
@@ -78,6 +207,19 @@ watch(
   },
   { immediate: true },
 )
+
+/**
+ * 正在连接中的配置名（优先选中的那条），空串表示没有。
+ *
+ * 「连接中」时圆按钮必须是「断开」：客户端不许对同一配置重复 AccountConnect
+ * （错误码 35），点「连接」只会收到一句报错，想重试就先断开——
+ * 和「连接配置」页同一条规则，两处不能一个能断、一个不能断。
+ */
+const connectingName = computed(() => {
+  const selected = accounts.value.find((account) => account.name === selectedName.value)
+  if (selected && isAccountConnecting(selected.status)) return selected.name
+  return accounts.value.find((account) => isAccountConnecting(account.status))?.name ?? ''
+})
 
 // 断开后让选择器停在刚断开的那条，方便立刻重连
 watch(
@@ -127,12 +269,33 @@ async function tick() {
   recordRate()
 }
 
-/** 手动刷新：只锁自己这一个按钮，不牵动其他按钮 */
+/**
+ * 手动刷新：丢掉缓存重读一份状态。
+ *
+ * 三个坑一次填掉：
+ * 1. 不能调 `tick()`——它开头有 `if (polling) return`，2 秒一轮的自动轮询
+ *    正好在跑时，点击会被静默吞掉，表现就是"点了没反应"。
+ * 2. 必须传 `fresh`：不传的话后端读的是缓存（清单 30 秒、会话 5 秒），
+ *    拿回同一份数据，看上去仍然什么都没发生。
+ * 3. 转圈要有最短时长：重读在缓存命中时只要几毫秒，图标闪一下等于没反馈。
+ */
+const MIN_SPIN_MS = 450
+
 async function manualRefresh() {
   if (refreshing.value) return
   refreshing.value = true
+  const startedAt = Date.now()
   try {
-    await tick()
+    await refresh(true)
+    errorText.value = ''
+    recordRate()
+    const elapsed = Date.now() - startedAt
+    if (elapsed < MIN_SPIN_MS) {
+      await new Promise((resolve) => window.setTimeout(resolve, MIN_SPIN_MS - elapsed))
+    }
+    showToast(t('overview.refreshed'))
+  } catch (error) {
+    errorText.value = String(error)
   } finally {
     refreshing.value = false
   }
@@ -191,26 +354,25 @@ watch(
         <h1>{{ t('overview.title') }}</h1>
       </div>
       <div class="row">
-        <button
-          v-if="!snapshot && overview?.serviceRunning"
-          class="ghost"
-          :disabled="!!busy"
-          :title="t('overview.stopTooltip')"
-          @click="stopService()"
-        >
-          <Power :size="14" /> {{ t('overview.stopService') }}
-        </button>
+        <!-- 启停客户端的按钮统一收在「SoftEther 客户端」页：
+             那是它真正作用的对象，放在这里会让人以为它只管当前这条隧道 -->
         <button
           class="ghost refresh-icon"
           :disabled="refreshing"
           :aria-label="t('overview.refresh')"
-          :title="t('overview.refresh')"
+          :title="t('overview.refreshTooltip')"
           @click="manualRefresh"
         >
           <RefreshCw :size="16" :class="{ spin: refreshing }" />
         </button>
       </div>
     </header>
+
+    <div v-if="serviceBusy && busyText" class="banner busy">
+      <Loader2 :size="13" class="spin" />
+      <span>{{ busyText }}</span>
+      <span class="hint">{{ t('overview.busyHint') }}</span>
+    </div>
 
     <div v-if="errorText" class="banner bad">
       {{ t('overview.readError', { error: errorText }) }}
@@ -223,8 +385,10 @@ watch(
 
     <div v-if="overview && !overview.serviceRunning" class="banner off">
       <span>{{ t('overview.serviceDown') }}</span>
-      <button class="ghost" :disabled="!!busy" @click="startService">
-        <Power :size="14" /> {{ t('overview.startService') }}
+      <button class="success" :disabled="!!busy" @click="startService">
+        <Loader2 v-if="serviceBusy" :size="14" class="spin" />
+        <Power v-else :size="14" />
+        {{ t('overview.startService') }}
       </button>
     </div>
 
@@ -242,7 +406,12 @@ watch(
         </template>
         <template v-else>
           <div class="status-heading">
-            <span class="badge off">
+            <!-- 客户端在反复重连时 AccountList 一直报「连接中」，这里要如实说"连接中"，
+                 不能跟着 snapshot 缺失就画成"未连接"——那样和配置页的绿色已连接会打架 -->
+            <span v-if="connectingName" class="badge warn">
+              <i class="dot" />{{ t('status.connecting') }}
+            </span>
+            <span v-else class="badge off">
               <i class="dot" />{{ overview?.serviceRunning ? t('status.disconnected') : t('status.serviceDown') }}
             </span>
           </div>
@@ -253,7 +422,47 @@ watch(
               :disabled="!overview?.serviceRunning"
             />
           </div>
-          <span v-else class="muted">{{ t('overview.noAccounts') }}</span>
+          <!-- 账号为空有三种完全不同的原因，必须分开说：
+               ① 客户端起来了但一块网卡都没有 → 先建网卡，否则新建配置时无处可绑
+               ② 客户端空着（内置那份是全新空配置）→ 账号可能躺在别的客户端目录里
+               ③ 客户端里确实没有 → 去「连接配置」新建
+               只写一句"暂无连接配置"，用户只会以为应用坏了。 -->
+          <div v-else class="no-accounts">
+            <template v-if="noNic">
+              <span class="muted">{{ t('overview.noNics') }}</span>
+              <span class="hint">{{ t('overview.noNicsHint') }}</span>
+              <button
+                class="primary small"
+                :disabled="!!busy || creatingNic"
+                @click="createDefaultNic"
+              >
+                <Loader2 v-if="creatingNic" :size="13" class="spin" />
+                <Plus v-else :size="13" />
+                {{ creatingNic ? t('overview.creatingNic') : t('overview.createNic') }}
+              </button>
+            </template>
+            <template v-else>
+              <span class="muted">{{ t('overview.noAccounts') }}</span>
+              <span v-if="!otherSource" class="hint">{{ t('overview.noAccountsHint') }}</span>
+            </template>
+            <!-- 账号躺在别的客户端目录：和有没有网卡无关，单独一条 -->
+            <template v-if="otherSource">
+              <span class="muted">
+                {{ t('overview.accountsElsewhere', { dir: otherSource.dir, n: otherSource.accounts }) }}
+              </span>
+              <!-- 一键切换：运行时先弹一次确认（会停掉当前服务），
+                   确认后由后端把"停 → 切 → 起"一次做完，用户不用管中间步骤 -->
+              <button
+                class="success small"
+                :disabled="!!busy"
+                @click="askSwitch(otherSource)"
+              >
+                <Loader2 v-if="serviceBusy" :size="13" class="spin" />
+                <ArrowRightLeft v-else :size="13" />
+                {{ t('overview.switchTo') }}
+              </button>
+            </template>
+          </div>
         </template>
       </div>
 
@@ -269,10 +478,33 @@ watch(
           <span v-if="elapsedClock !== null" class="action-duration">{{ elapsedClock }}</span>
           <span class="action-label">{{ busy === `disconnect:${snapshot.name}` ? t('common.disconnecting') : t('common.disconnect') }}</span>
         </button>
+        <!-- 「连接中」也是「断开」：客户端不许对同一配置重复 AccountConnect（错误码 35），
+             点「连接」只会收到报错；想重试就先断开——和「连接配置」页同一条规则 -->
         <button
-          v-else-if="accounts.length"
+          v-else-if="connectingName"
+          class="connection-action disconnect-action"
+          :disabled="!!busy"
+          @click="disconnectAccount(connectingName)"
+        >
+          <DisconnectIcon class="disconnect-icon" />
+          <span class="action-label">
+            {{
+              busy === `connect:${connectingName}`
+                ? t('common.connecting')
+                : busy === `disconnect:${connectingName}`
+                  ? t('common.disconnecting')
+                  : t('common.disconnect')
+            }}
+          </span>
+        </button>
+        <!-- 永远渲染这颗圆按钮：没有配置/服务没起时置灰。
+             直接不显示会让状态卡右半边突然空掉，用户还得自己猜"连接去哪了"。 -->
+        <button
+          v-else
           class="connection-action connect-action"
-          :disabled="!!busy || !overview?.serviceRunning || !selectedName"
+          :disabled="!!busy || !!connectBlockedReason"
+          :title="connectBlockedReason || undefined"
+          :style="blockedStyle"
           @click="connectAccount(selectedName)"
         >
           <svg class="connect-icon" viewBox="0 0 1024 1024" width="34" height="34" fill="currentColor" aria-hidden="true">
@@ -372,6 +604,20 @@ watch(
   gap: 6px;
 }
 
+/* 空账号提示：文案 + 动作按钮，竖排左对齐，不要把状态卡撑高太多 */
+.no-accounts {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.no-accounts button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .banner {
   display: flex;
   align-items: center;
@@ -381,6 +627,17 @@ watch(
   border-radius: var(--radius-ctl);
   font-size: 12px;
   border: 0.5px solid;
+}
+
+/* 进行中的提示：用中性色，别让它看着像出错 */
+.banner.busy {
+  background: var(--ghost-hover-bg);
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+.banner.busy .hint {
+  color: var(--text-soft);
 }
 
 .banner.warn {
@@ -471,7 +728,12 @@ watch(
 }
 
 .connection-action:disabled {
-  opacity: .65;
+  /* 只调透明度会让人以为还点得动：按钮仍是亮蓝渐变。
+     真正置灰要换掉背景、去掉投影，并显式给默认光标。 */
+  background: linear-gradient(145deg, var(--line-strong), var(--line));
+  color: var(--text-soft);
+  box-shadow: none;
+  cursor: default;
 }
 
 .action-label {

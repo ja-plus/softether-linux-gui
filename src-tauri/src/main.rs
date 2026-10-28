@@ -36,6 +36,9 @@ fn state_settings(state: &State<AppState>) -> Settings {
 }
 
 fn store_settings(state: &State<AppState>, settings: Settings) -> Result<(), String> {
+    // 进内存前先归一化：界面拿到的必须是自洽的一份（风格/语言/客户端来源），
+    // 否则写进来的错位值会一直显示到下次重启。
+    let settings = settings.normalized();
     settings.save()?;
     *state.settings.lock().map_err(|_| {
         softether_tray_lib::i18n::tr("设置锁被占用", "The settings lock is busy").to_string()
@@ -81,17 +84,32 @@ fn rebuild_tray(app: &AppHandle, overview: &Overview) -> tauri::Result<()> {
             }
         })
         .unwrap_or_else(|| {
-            softether_tray_lib::i18n::tr("SoftEther VPN · 未连接", "SoftEther VPN · Disconnected")
-                .to_string()
+            if overview.service_running {
+                softether_tray_lib::i18n::tr("SoftEther VPN · 未连接", "SoftEther VPN · Disconnected")
+                    .to_string()
+            } else {
+                softether_tray_lib::i18n::tr("SoftEther VPN · 服务未启动", "SoftEther VPN · Service stopped")
+                    .to_string()
+            }
         });
 
     // 菜单项先算成 (id, label) 列表：签名要拿它们比对，没变就整轮跳过重建
     let mut account_items: Vec<(String, String)> = Vec::new();
     if overview.accounts.is_empty() {
-        account_items.push((
-            "no-account".into(),
-            softether_tray_lib::i18n::tr("（还没有连接配置）", "(No connection profiles)").into(),
-        ));
+        // 空清单有两种成因，别混成一句：客户端没跑时 accounts 必然为空，
+        // 这时显示「还没有连接配置」是误导，该直接给一个启动服务的入口。
+        if !overview.service_running {
+            account_items.push((
+                "start-service".into(),
+                softether_tray_lib::i18n::tr("（服务未启动）点击启动服务", "(Service stopped) Click to start")
+                    .into(),
+            ));
+        } else {
+            account_items.push((
+                "no-account".into(),
+                softether_tray_lib::i18n::tr("（还没有连接配置）", "(No connection profiles)").into(),
+            ));
+        }
     }
     let mut seen = HashSet::new();
     for account in &overview.accounts {
@@ -194,10 +212,132 @@ fn rebuild_tray(app: &AppHandle, overview: &Overview) -> tauri::Result<()> {
 
 fn show_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        // 最小化的窗口不能只靠 show/unminimize/set_focus：tao 的 set_focus 在窗口
+        // 最小化时会把焦点请求直接丢弃，而它恢复用的 deiconify 底层只是 XMapWindow，
+        // DDE 这类窗口管理器根本不认，窗口原地不动。hide→show 先向 WM 撤回再重新
+        // 映射，重新映射的窗口必然按 Normal 状态显示，焦点请求随后才发得出去。
+        let minimized = window.is_minimized().unwrap_or(false);
+        if minimized {
+            let _ = window.hide();
+        }
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        if minimized {
+            // 「已最小化」标志要等窗口状态事件才清掉，那之前 set_focus 依旧会被
+            // tao 丢弃，所以稍后补一次；标志没清掉说明窗口没被重映射成功，再走一遍。
+            let window = window.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                if window.is_minimized().unwrap_or(false) {
+                    let _ = window.hide();
+                    let _ = window.show();
+                }
+                let _ = window.set_focus();
+            });
+        }
     }
+}
+
+/// dev 场景兜底：裸跑 debug 二进制（没起 vite）时 webview 只能加载到浏览器的连接
+/// 失败页，而窗口是无边框的——页内标题栏跟着整页一起丢，窗口既拖不动也关不掉。
+/// 探到 dev_url 没人在听就换回系统标题栏，再把报错页换成说人话的提示。
+/// 正式版前端内嵌、无 dev_url，永远走不到这里；vite 在跑时探测成功，什么都不做。
+fn dev_server_fallback(handle: &AppHandle, window: &tauri::WebviewWindow) {
+    if !tauri::is_dev() {
+        return;
+    }
+    let Some(dev_url) = handle.config().build.dev_url.clone() else {
+        return;
+    };
+    // 只认本机回环地址：远程 dev_url 是否在跑无从判断，别乱动窗口
+    match dev_url.host_str() {
+        Some("localhost" | "127.0.0.1" | "::1") => {}
+        _ => return,
+    }
+    let Some(port) = dev_url.port_or_known_default() else {
+        return;
+    };
+    // 探测放后台线程：连不上要等超时，不能拖住启动
+    let window = window.clone();
+    std::thread::spawn(move || {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
+        use std::time::Duration;
+        // localhost 可能解析成 IPv4 或 IPv6，任一通就认为 vite 在跑
+        let reachable = [IpAddr::from(Ipv4Addr::LOCALHOST), IpAddr::from(Ipv6Addr::LOCALHOST)]
+            .into_iter()
+            .any(|ip| {
+                TcpStream::connect_timeout(&SocketAddr::new(ip, port), Duration::from_millis(400))
+                    .is_ok()
+            });
+        if reachable {
+            return;
+        }
+        let _ = window.set_decorations(true);
+        let _ = window.navigate(fallback_page_url());
+    });
+}
+
+/// 前端没加载起来时的兜底页。纯 data: URL、不碰 IPC：窗口操作全交给系统标题栏。
+fn fallback_page_url() -> tauri::Url {
+    let tr = softether_tray_lib::i18n::tr;
+    let html = format!(
+        r##"<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>SoftEther Tray</title>
+<style>
+  body {{ margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #f3f3f3; color: #1f1f1f; font: 13px/1.7 "Segoe UI Variable Text", "Segoe UI", "Noto Sans CJK SC", "Source Han Sans SC", system-ui, sans-serif; }}
+  .card {{ width: 430px; box-sizing: border-box; background: #fff; border: 1px solid #e5e5e5; border-radius: 8px; padding: 28px 32px; }}
+  .mark {{ width: 32px; height: 32px; display: block; margin-bottom: 14px; }}
+  h1 {{ font-size: 15px; font-weight: 600; margin: 0 0 10px; }}
+  p {{ margin: 0 0 10px; color: #5c5c5c; }}
+  code {{ background: #fafafa; border: 1px solid #e5e5e5; border-radius: 4px; padding: 1px 6px; font-size: 12px; color: #1f1f1f; }}
+  .hint {{ color: #8a8a8a; font-size: 12px; margin: 0; }}
+</style>
+</head>
+<body>
+  <div class="card">
+    <svg class="mark" viewBox="0 0 256 256">
+      <rect width="256" height="256" rx="58" fill="#2a2a2a" />
+      <path d="M70 96a58 58 0 0 1 116 0" fill="none" stroke="#fff" stroke-width="14" stroke-linecap="round" />
+      <circle cx="128" cy="140" r="26" fill="none" stroke="#fff" stroke-width="14" />
+      <path d="M104 188h48" stroke="#fff" stroke-width="14" stroke-linecap="round" />
+      <circle cx="128" cy="58" r="9" fill="#5dcaa5" />
+    </svg>
+    <h1>{title}</h1>
+    <p>{desc}</p>
+    <p>{howto}</p>
+    <p class="hint">{hint}</p>
+  </div>
+</body>
+</html>"##,
+        title = tr("界面未能加载", "The interface could not be loaded"),
+        desc = tr(
+            "没有检测到前端开发服务器（localhost:1420），应用界面加载失败。",
+            "The frontend dev server (localhost:1420) is not running, so the interface could not load.",
+        ),
+        howto = tr(
+            "请在项目目录运行 <code>npm run tauri dev</code>（或先运行 <code>npm run dev</code>），然后重新打开应用。",
+            "Run <code>npm run tauri dev</code> (or <code>npm run dev</code> first) in the project directory, then reopen the app.",
+        ),
+        hint = tr(
+            "窗口已改用系统标题栏，可正常拖动与关闭。",
+            "The window now uses the system title bar, so it can still be moved and closed.",
+        ),
+    );
+    // HTML 整体百分号编码：url crate 会把 data: 当不透明路径处理，裸留空格、引号
+    // 会被二次改写，编码到只剩字母数字最稳。
+    let mut url = String::with_capacity(html.len() * 3 + 64);
+    url.push_str("data:text/html;charset=utf-8,");
+    for byte in html.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => url.push(byte as char),
+            _ => url.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    tauri::Url::parse(&url).expect("generated data URL must parse")
 }
 
 /// 退出前的统一收尾：断开当前 VPN；是否停止客户端服务由设置决定。
@@ -231,6 +371,7 @@ fn handle_menu(app: &AppHandle, id: &str) {
             app.exit(0);
         }
         "open" => show_window(app),
+        "start-service" => start_service_from_tray(app),
         "diag" => {
             show_window(app);
             let _ = app.emit("open-diagnostics", ());
@@ -305,6 +446,29 @@ fn notify_disconnected(app: &AppHandle, name: &str) {
     );
 }
 
+/// 托盘里的「启动服务」：只拉起客户端，不替用户自动连某个账户——
+/// 该连哪个由菜单里点谁决定，这里不能猜。
+fn start_service_from_tray(app: &AppHandle) {
+    let settings = state_settings(&app.state::<AppState>());
+    match vpn::start_service(&settings) {
+        Ok(spawned) => {
+            if spawned {
+                vpn::mark_managed();
+            }
+            // 服务刚起来，账户清单还是空的，必须重新读一份再广播
+            publish(app);
+        }
+        Err(error) => {
+            report_error(
+                app,
+                softether_tray_lib::i18n::tr("客户端未启动", "Service did not start"),
+                &error,
+            );
+            publish(app);
+        }
+    }
+}
+
 fn connect_account(app: &AppHandle, name: String) {
     match do_connect(app, &name) {
         Ok(overview) => {
@@ -342,9 +506,22 @@ fn do_connect(app: &AppHandle, name: &str) -> Result<Overview, String> {
     if vpn::start_service(&settings)? {
         vpn::mark_managed();
     }
-    let already = settings::vpncmd(&settings, settings::VpncmdAuth::Plain, &["AccountStatusGet", name])
-        .map(|o| softether_tray_lib::softether::status_is_connected(&o.stdout))
+    let current = vpn::account_snapshot(&settings, name);
+    let already = current.as_ref().map(|snap| snap.connected).unwrap_or(false);
+    let stuck = current
+        .as_ref()
+        .map(|snap| {
+            !snap.connected && softether_tray_lib::softether::status_is_connecting(&snap.state)
+        })
         .unwrap_or(false);
+
+    // 半连接（客户端在无限重连）要先收掉：「连接中」的账户再发 AccountConnect
+    // 会直接被客户端拒掉——错误代码 35「指定的 VPN 连接设置当前已连接」。
+    // 用户点了连接就是想要一次新的尝试，所以断开重来，而不是干等它自己重连。
+    if stuck {
+        let _ = settings::vpncmd(&settings, settings::VpncmdAuth::Plain, &["AccountDisconnect", name]);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
 
     // 并发点击和自动连接可能同时进来；真实连接已经存在时不再发第二条 AccountConnect。
     if !already {
@@ -353,21 +530,34 @@ fn do_connect(app: &AppHandle, name: &str) -> Result<Overview, String> {
             return Err(vpn::last_error(&output.stdout));
         }
     }
+
     // 会话建立是异步的：状态真变已连接之后才动路由，避免往死网卡塞路由。
+    //
+    // 30 秒不是随手写的：远程服务器要 TLS 握手 + 用户认证，实测正常连接
+    // 就要十几秒（会话状态走「开始连接 → 重试 → 验证用户身份」）。原来只给
+    // 8 秒，慢一点的服务器会被误判成超时，而"超时"和"真连不上"在界面上
+    // 长得一模一样，用户根本分不清是网络慢还是配置错。
+    //
+    // 等待期间记下最后一次会话状态，报错时才能说清卡在"重试"还是压根没开始。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut last_state = String::new();
     let mut connected = already;
-    for _ in 0..16 {
-        if connected || vpn::account_status(&settings, name).is_some() {
-            connected = true;
-            break;
+    while !connected && std::time::Instant::now() < deadline {
+        match vpn::account_snapshot(&settings, name) {
+            Some(snap) if snap.connected => {
+                connected = true;
+                break;
+            }
+            Some(snap) => last_state = snap.state,
+            None => {}
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
     if !connected {
-        return Err(softether_tray_lib::i18n::tr(
-            "等待隧道建立超时，请查看客户端日志或网络状态",
-            "Timed out waiting for the tunnel; check the client log or network status.",
-        )
-        .into());
+        // 客户端还在后台无限重连：不收掉的话界面会一直挂着「连接中」，
+        // 而且它会持续占着会话反复重试。
+        let _ = settings::vpncmd(&settings, settings::VpncmdAuth::Plain, &["AccountDisconnect", name]);
+        return Err(connect_timeout_error(name, &last_state));
     }
 
     // 隧道通了但网卡没地址是 Linux 客户端的常态：它只管链路层，IP 要自己弄。
@@ -388,26 +578,12 @@ fn do_connect(app: &AppHandle, name: &str) -> Result<Overview, String> {
                 args.push("--lease");
             }
             settings::run_helper(&args).map_err(|e| {
-                decorate_dhcp_error(e, &iface, need_lease)
+                decorate_net_error(e, &iface, need_lease)
             })?
         } else {
             let script = settings::connect_routes_script(&iface, &settings.routes, need_lease)?;
             settings::run_privileged(&script).map_err(|e| {
-                if need_lease && !settings::has_dhcp_client() {
-                    if softether_tray_lib::i18n::is_en() {
-                        format!(
-                            "{e}\nNo dhclient/dhcpcd is available, so {iface} cannot get an IP. \
-                             Install a DHCP client (sudo apt install isc-dhcp-client) or assign a static address to {iface}."
-                        )
-                    } else {
-                        format!(
-                            "{e}\n系统没有 dhclient/dhcpcd，{iface} 拿不到 IP。\
-                             请安装 DHCP 客户端（sudo apt install isc-dhcp-client），或手动为 {iface} 配静态地址"
-                        )
-                    }
-                } else {
-                    e
-                }
+                decorate_net_error(e, &iface, need_lease)
             })?
         };
         // 提权跑完再看一眼真实状态，别拿脚本的回显当结论
@@ -448,6 +624,78 @@ fn do_connect(app: &AppHandle, name: &str) -> Result<Overview, String> {
         }
     }
     Ok(vpn::read_overview_fresh(&settings))
+}
+
+/// 等待隧道超时时能说的实话。
+///
+/// 光说"超时"没用：客户端可能卡在「重试」（多半是密码 / 用户 / HUB 不对，
+/// 或服务端限流），也可能压根没开始握手。把最后看到的会话状态和对应的
+/// 排查方向一起给出来，用户才知道该改配置还是该查网络。
+fn connect_timeout_error(name: &str, last_state: &str) -> String {
+    let state = last_state.trim();
+    if softether_tray_lib::i18n::is_en() {
+        if state.is_empty() {
+            format!(
+                "Timed out waiting for \"{name}\" to connect, and the client reported no session state. \
+                 Check the client log and whether the server is reachable."
+            )
+        } else {
+            format!(
+                "Timed out waiting for \"{name}\" to connect: the client is stuck at \"{state}\" and keeps retrying. \
+                 That usually means a wrong password, an unknown user or HUB name, or a server-side limit — \
+                 check the profile and the client log."
+            )
+        }
+    } else if state.is_empty() {
+        format!(
+            "等待「{name}」建立隧道超时，客户端也没有给出会话状态。\
+             请查看客户端日志，并确认服务器地址可达"
+        )
+    } else {
+        format!(
+            "等待「{name}」建立隧道超时：客户端一直卡在「{state}」并反复重试。\
+             多半是密码不对、用户名或 HUB 名称写错，或者服务端限制了这个账号——\
+             请核对配置并查看客户端日志"
+        )
+    }
+}
+
+/// 把网卡配置那一步的失败翻译成人能看懂的话。
+///
+/// 两种失败都藏在 stderr 的标记里，必须先认出来再谈别的：
+///   - `NO_ADDRESS`：网卡没有 IPv4，网关必然推不出来——该查 DHCP / 静态地址；
+///   - `NO_GATEWAY`：有地址但推不出第一跳——该查路由表。
+/// 反过来的话（把没地址报成 NO_GATEWAY）会把人引去翻路由，方向上就错了。
+fn decorate_net_error(message: String, iface: &str, need_lease: bool) -> String {
+    if message.contains("NO_ADDRESS") {
+        return if softether_tray_lib::i18n::is_en() {
+            format!(
+                "Virtual adapter {iface} has no IPv4 address, so no tunnel gateway could be derived \
+                 and routes were not installed. DHCP did not deliver a lease: enable the Virtual \
+                 DHCP Server on the server HUB, or assign a static address to {iface}."
+            )
+        } else {
+            format!(
+                "虚拟网卡 {iface} 没有 IPv4 地址，推不出隧道网关，路由未下发。\
+                 DHCP 没要来地址：请在服务端 HUB 上启用「虚拟 DHCP 服务器」，\
+                 或手动为 {iface} 配置静态地址"
+            )
+        };
+    }
+    if message.contains("NO_GATEWAY") {
+        return if softether_tray_lib::i18n::is_en() {
+            format!(
+                "Cannot determine the tunnel gateway for {iface}, so routes were not installed. \
+                 Check that the adapter has an address and a route on it (`ip -4 route show dev {iface}`)."
+            )
+        } else {
+            format!(
+                "无法确定 {iface} 的隧道网关，路由未下发。\
+                 请确认网卡上有地址和路由（`ip -4 route show dev {iface}`）"
+            )
+        };
+    }
+    decorate_dhcp_error(message, iface, need_lease)
 }
 
 /// helper 报 NoDhcpClient 或连接时缺 DHCP 客户端，都该给出可操作的安装提示。
@@ -535,7 +783,9 @@ async fn get_overview(app: AppHandle) -> Result<Overview, String> {
 
 #[tauri::command]
 async fn connect(app: AppHandle, name: String) -> Result<Overview, String> {
-    let result = do_connect(&app, &name);
+    // do_connect 里要等隧道建立（最长 30 秒）、还要等 polkit 授权，都是阻塞调用。
+    // 直接放在 async 命令里会占死一个 runtime worker，界面轮询跟着一起卡住。
+    let result = do_connect_blocking(&app, &name).await;
     // do_connect 成功时已带回最终状态，直接广播它；失败才重新读一份
     match &result {
         Ok(overview) => {
@@ -547,6 +797,23 @@ async fn connect(app: AppHandle, name: String) -> Result<Overview, String> {
         }
     }
     result
+}
+
+/// 把 `do_connect` 丢到阻塞线程池里跑，别占着 async runtime 的 worker。
+async fn do_connect_blocking(app: &AppHandle, name: &str) -> Result<Overview, String> {
+    let task = {
+        let app = app.clone();
+        let name = name.to_string();
+        tauri::async_runtime::spawn_blocking(move || do_connect(&app, &name))
+    };
+    match task.await {
+        Ok(result) => result,
+        Err(e) => Err(softether_tray_lib::i18n::tr(
+            &format!("连接任务失败: {e}"),
+            &format!("The connection task failed: {e}"),
+        )
+        .to_string()),
+    }
 }
 
 #[tauri::command]
@@ -598,9 +865,17 @@ fn client_managed() -> bool {
 /// 冷启动 vpncmd。即便如此也必须放阻塞线程池：同步命令在主线程内联执行，
 /// 一旦碰上"这一轮要真读"的那一刻，界面就会整段冻住。
 #[tauri::command]
-async fn refresh(app: AppHandle) -> Result<Overview, String> {
+async fn refresh(app: AppHandle, fresh: Option<bool>) -> Result<Overview, String> {
+    // `fresh` = 用户主动点了刷新：丢掉三层缓存（服务探测 2s / 清单 30s /
+    // 会话 5s）重新读一遍，代价是一次 vpncmd 冷启动（约 250ms），手动点一次付得起。
+    // 轮询路径不传（None），继续吃缓存，不然每 2 秒就要 fork 两次 vpncmd。
+    let fresh = fresh.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || {
-        let overview = current_overview(&app);
+        let overview = if fresh {
+            fresh_overview(&app)
+        } else {
+            current_overview(&app)
+        };
         let _ = rebuild_tray(&app, &overview);
         // 刻意不 emit "overview"：返回值就是前端的更新通道，
         // 两条路都推会让同一份数据每 2 秒渲染两遍
@@ -628,10 +903,13 @@ async fn save_settings(app: AppHandle, settings: Settings) -> Result<Settings, S
     }
     settings::validate_mtu(settings.routes.mtu)?;
     validate_client_choice(&settings)?;
-    store_settings(&app.state::<AppState>(), settings.clone())?;
-    softether_tray_lib::i18n::set_locale(&settings.locale);
+    // 返回归一化后的那一份：前端据此判断"磁盘上到底是什么"，
+    // 原样回显会让「自己指定填了内置目录」这类错位一直留到下次打开
+    let normalized = settings.normalized();
+    store_settings(&app.state::<AppState>(), normalized.clone())?;
+    softether_tray_lib::i18n::set_locale(&normalized.locale);
     publish(&app);
-    Ok(settings)
+    Ok(normalized)
 }
 
 /// 保存前校验「来源 + 目录」这一对是否自洽。
@@ -679,6 +957,240 @@ fn validate_client_choice(settings: &Settings) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+/// 把「用哪个客户端」写进设置。
+///
+/// 来源没给或认不出来时**按目录反推**，别一律记成「自己指定」：内置目录
+/// 被记成"自己指定"，界面就和实际跑的那份对不上（真踩过：连接配置页
+/// 切回来之后客户端页显示"自己指定"，可跑的明明是内置客户端）。
+/// 内置不看路径，`vpn_dir` 不写，和前端保存时的归一化口径一致。
+fn apply_client_choice(settings: &mut Settings, dir: &str, source: Option<&str>) {
+    let parsed = source
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(softether_tray_lib::client_dir::ClientSource::parse)
+        .unwrap_or_else(|| softether_tray_lib::client_dir::derive_source(dir));
+    settings.client_source = Some(parsed.as_str().to_string());
+    settings.vpn_dir = match parsed {
+        softether_tray_lib::client_dir::ClientSource::Bundled => None,
+        _ => Some(dir.to_string()),
+    };
+}
+
+/// 一份客户端目录里有多少个连接账号，以及它是不是当前正在用的那份。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountSource {
+    dir: String,
+    accounts: usize,
+    current: bool,
+    /// 这个目录的来源（内置 / 扫到的 / 自己指定）。
+    /// 前端要拿它回传给「切换客户端」，传错来源会把内置客户端记成自己指定。
+    source: softether_tray_lib::client_dir::ClientSource,
+}
+
+/// 各客户端目录各自的账号数。
+///
+/// 客户端的连接配置是**跟着客户端目录走**的（`vpn_client.config`），
+/// 内置客户端和用户自装的那份互不相通。用户切了来源之后看到"暂无连接配置"，
+/// 如果没有这个接口，界面只能显示一句干巴巴的空状态，没人能猜到
+/// 账号其实在另一个目录里。
+#[tauri::command]
+async fn account_sources(app: AppHandle) -> Result<Vec<AccountSource>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let settings = state_settings(&app.state::<AppState>());
+        let current = softether_tray_lib::client_dir::resolve(
+            settings
+                .client_source
+                .as_deref()
+                .and_then(softether_tray_lib::client_dir::ClientSource::parse),
+            settings.vpn_dir.as_deref(),
+        )
+        .ok()
+        .map(|resolved| softether_tray_lib::settings::path_display(&resolved.dir));
+
+        softether_tray_lib::client_dir::candidates(settings.vpn_dir.as_deref())
+            .into_iter()
+            .map(|candidate| AccountSource {
+                accounts: softether_tray_lib::client_dir::account_count(std::path::Path::new(
+                    &candidate.dir,
+                )),
+                current: current.as_deref() == Some(candidate.dir.as_str()),
+                source: candidate.source,
+                dir: candidate.dir,
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| {
+        if softether_tray_lib::i18n::is_en() {
+            format!("Failed to read the client list: {e}")
+        } else {
+            format!("读取客户端列表失败: {e}")
+        }
+    })
+}
+
+/// 把内置客户端的配置文件属主交还给当前用户（只尝试一次）。
+///
+/// 客户端以 root 运行，`vpn_client.config` 会被写成 root:root 0600；
+/// 应用是普通用户，读不到 → "连接配置"页里内置那一组永远是空的。
+/// 交给特权助手 chown 一次就能长期可读（实测客户端重启不会改回 root）。
+///
+/// 只做一次：失败也不重试，避免每次进页面都去碰 pkexec。
+static CLAIM_TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn ensure_config_readable(dir: &str) {
+    let path = std::path::Path::new(dir).join("vpn_client.config");
+    // 能读就什么都不做；文件不存在说明客户端还没跑过，也没得改
+    if std::fs::read(&path).is_ok() || !path.exists() {
+        return;
+    }
+    if CLAIM_TRIED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    // 等 5 秒就够：polkit 免密时是毫秒级；需要输密码时不能把列表卡死
+    let _ = settings::run_helper_with_timeout(&["claim-config", dir], Some(5));
+}
+
+/// 一组配置：某个客户端目录 + 它里面的连接配置。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientAccountGroup {
+    dir: String,
+    /// 展示用短名（内置 / 目录名），前端还会补上完整路径
+    label: String,
+    /// 是不是正在用的那份客户端
+    current: bool,
+    /// 这个目录的来源（内置 / 扫到的 / 自己指定）。
+    /// 前端「切换并连接」要原样回传，否则内置客户端会被记成自己指定。
+    source: softether_tray_lib::client_dir::ClientSource,
+    accounts: Vec<softether_tray_lib::client_dir::StaticAccount>,
+}
+
+/// 把这台机器上**所有**客户端目录里的配置都列出来。
+///
+/// 连接配置跟着客户端目录走，用户往往在多份客户端里各有一批。
+/// 只展示当前那份等于把别的藏起来——用户会以为配置丢了。
+#[tauri::command]
+async fn client_account_groups(app: AppHandle) -> Result<Vec<ClientAccountGroup>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let settings = state_settings(&app.state::<AppState>());
+        let current = softether_tray_lib::client_dir::resolve(
+            settings
+                .client_source
+                .as_deref()
+                .and_then(softether_tray_lib::client_dir::ClientSource::parse),
+            settings.vpn_dir.as_deref(),
+        )
+        .ok()
+        .map(|resolved| softether_tray_lib::settings::path_display(&resolved.dir));
+
+        softether_tray_lib::client_dir::candidates(settings.vpn_dir.as_deref())
+            .into_iter()
+            // 文件不全或目录不可写的客户端，配置读了也不可信
+            .filter(|candidate| candidate.usable)
+            .filter_map(|candidate| {
+                // 读不到配置（典型：root 所有 0600）就先让助手把属主交还，
+                // 修好之后再读，否则这一组会静默消失
+                ensure_config_readable(&candidate.dir);
+                let path = std::path::Path::new(&candidate.dir);
+                let accounts = softether_tray_lib::client_dir::accounts_in(path);
+                // 空目录不占位：列表里只出现真有配置的客户端
+                if accounts.is_empty() {
+                    return None;
+                }
+                let label = match candidate.source {
+                    softether_tray_lib::client_dir::ClientSource::Bundled => {
+                        softether_tray_lib::i18n::tr("内置客户端", "Built-in client").to_string()
+                    }
+                    _ => path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_else(|| candidate.dir.clone()),
+                };
+                Some(ClientAccountGroup {
+                    current: current.as_deref() == Some(candidate.dir.as_str()),
+                    source: candidate.source,
+                    label,
+                    dir: candidate.dir,
+                    accounts,
+                })
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| {
+        if softether_tray_lib::i18n::is_en() {
+            format!("Failed to read client profiles: {e}")
+        } else {
+            format!("读取各客户端的连接配置失败: {e}")
+        }
+    })
+}
+
+/// 在**另一个**客户端目录里连接某个配置：切客户端 → 启动 → 连接，一次做完。
+///
+/// 必须原子：那份配置只存在于它自己的客户端目录里。光切不连，用户还得再点一次；
+/// 光连不切，连的是当前客户端里同名的另一个配置，几乎必然失败。
+#[tauri::command]
+async fn connect_in_client(
+    app: AppHandle,
+    dir: String,
+    name: String,
+    source: Option<String>,
+) -> Result<Overview, String> {
+    let settings = state_settings(&app.state::<AppState>());
+    if vpn::service_running() {
+        vpn::stop_service(&settings, Some(60))?;
+    }
+    let mut next = settings;
+    apply_client_choice(&mut next, &dir, source.as_deref());
+    validate_client_choice(&next)?;
+    store_settings(&app.state::<AppState>(), next)?;
+
+    let result = do_connect_blocking(&app, &name).await;
+    match &result {
+        Ok(overview) => {
+            notify_connected(&app, &name, overview);
+            publish_with(&app, overview);
+        }
+        Err(_) => {
+            publish(&app);
+        }
+    }
+    result
+}
+
+/// 切到另一个客户端目录：**停旧的 → 写设置 → 起新的**，一次做完。
+///
+/// 必须是原子动作。只写设置不停服务，界面显示新目录、实际还在跑旧那份，
+/// 用户会以为切换生效了；而让用户自己先停再切，中间任何一步漏掉也是同一个结果。
+/// 前端负责在调用前确认（"会停止当前服务，是否继续"），这里只管把事做完。
+#[tauri::command]
+async fn switch_client_dir(
+    app: AppHandle,
+    dir: String,
+    // 用户点的是哪一张来源卡片。不传时按目录反推（内置目录=builtin），
+    // 传进来的值必须是三种来源之一——乱传/不传都一律记成"自己指定"的话，
+    // 前端从别的客户端切回内置时就会把来源写错。
+    source: Option<String>,
+) -> Result<Overview, String> {
+    let settings = state_settings(&app.state::<AppState>());
+    let was_running = vpn::service_running();
+    if was_running {
+        vpn::stop_service(&settings, Some(60))?;
+    }
+    let mut next = settings;
+    apply_client_choice(&mut next, &dir, source.as_deref());
+    validate_client_choice(&next)?;
+    store_settings(&app.state::<AppState>(), next)?;
+    let next = state_settings(&app.state::<AppState>());
+    if vpn::start_service(&next)? {
+        vpn::mark_managed();
+    }
+    Ok(publish(&app))
 }
 
 /// 列出所有可用的客户端目录（内置 / 扫到的 / 用户指定的）。
@@ -766,6 +1278,28 @@ async fn delete_account(app: AppHandle, name: String) -> Result<Overview, String
 async fn create_nic(app: AppHandle, name: String) -> Result<Vec<NicInfo>, String> {
     let settings = state_settings(&app.state::<AppState>());
     accounts::create_nic(&settings, &name)?;
+    Ok(vpn::read_overview_fresh(&settings).nics)
+}
+
+/// 删除虚拟网卡。用它的连接配置会失去网卡，必须先让用户确认（前端负责）。
+#[tauri::command]
+async fn delete_nic(app: AppHandle, name: String) -> Result<Vec<NicInfo>, String> {
+    let settings = state_settings(&app.state::<AppState>());
+    accounts::delete_nic(&settings, &name)?;
+    let overview = vpn::read_overview_fresh(&settings);
+    let _ = rebuild_tray(&app, &overview);
+    Ok(overview.nics)
+}
+
+/// 启用 / 禁用虚拟网卡。
+#[tauri::command]
+async fn set_nic_enabled(
+    app: AppHandle,
+    name: String,
+    enabled: bool,
+) -> Result<Vec<NicInfo>, String> {
+    let settings = state_settings(&app.state::<AppState>());
+    accounts::set_nic_enabled(&settings, &name, enabled)?;
     Ok(vpn::read_overview_fresh(&settings).nics)
 }
 
@@ -866,10 +1400,13 @@ async fn verify_routes(app: AppHandle) -> Result<RouteReport, String> {
         })??
     } else {
         // 没装 helper 时也能用，只是会弹一次密码框。
-        // 输出格式必须与 helper 的 probe 完全一致，否则解析层要写两套。
+        // 输出格式必须与 helper 的 probe 完全一致，否则解析层要写两套；
+        // 网关推导也要与 connect 一致（默认路由的 via 优先），否则"验证"和
+        // "下发"用的不是同一个网关，通不通的结论就没有意义。
         let script = format!(
             "iface={iface}\nnets={nets_arg}\n\
-             gw=$(ip -4 route show dev $iface | awk '/proto kernel/ && / src / {{print $1; exit}}' | cut -d/ -f1 | awk -F. 'BEGIN{{OFS=\".\"}} NF==4{{$4=1; print}}')\n\
+             gw=$(ip -4 route show default dev $iface 2>/dev/null | awk '/via/ {{for (i = 1; i <= NF; i++) if ($i == \"via\") {{print $(i + 1); exit}}}}')\n\
+             [ -n \"$gw\" ] || gw=$(ip -4 route show dev $iface | awk '/proto kernel/ && / src / {{print $1; exit}}' | cut -d/ -f1 | awk -F. 'BEGIN{{OFS=\".\"}} NF==4{{$4=1; print}}')\n\
              [ -n \"$gw\" ] || {{ echo NO_GATEWAY >&2; exit 3; }}\n\
              if ping -c 1 -W 2 -I $iface $gw >/dev/null 2>&1; then echo 'TUNNEL up'; else echo 'TUNNEL down'; fi\n\
              IFS=,; set -- $nets\n\
@@ -1029,6 +1566,31 @@ fn open_config_dir() -> Result<String, String> {
     Ok(dir.display().to_string())
 }
 
+/// 打开任意一个已存在的目录（各客户端目录分组各自的那份，不是应用设置目录）。
+#[tauri::command]
+fn open_dir(path: String) -> Result<String, String> {
+    let dir = std::path::Path::new(&path);
+    // 前端传来的路径必须是已存在的目录，别让 xdg-open 拿到文件或空路径
+    if !dir.is_dir() {
+        return Err(if softether_tray_lib::i18n::is_en() {
+            format!("Not a directory: {}", dir.display())
+        } else {
+            format!("不是有效的目录: {}", dir.display())
+        });
+    }
+    std::process::Command::new("xdg-open")
+        .arg(dir)
+        .spawn()
+        .map_err(|e| {
+            if softether_tray_lib::i18n::is_en() {
+                format!("Cannot open {}: {e}", dir.display())
+            } else {
+                format!("无法打开 {}: {e}", dir.display())
+            }
+        })?;
+    Ok(dir.display().to_string())
+}
+
 #[tauri::command]
 async fn quit_app(app: AppHandle) -> Result<(), String> {
     shutdown_client(&app);
@@ -1067,6 +1629,8 @@ fn main() {
             save_account,
             delete_account,
             create_nic,
+            delete_nic,
+            set_nic_enabled,
             run_diagnostics,
             diag_default_target,
             verify_routes,
@@ -1075,7 +1639,12 @@ fn main() {
             env_info,
             config_dir_path,
             open_config_dir,
+            open_dir,
             list_client_candidates,
+            account_sources,
+            client_account_groups,
+            connect_in_client,
+            switch_client_dir,
             validate_client_dir,
             open_softether_site,
             quit_app
@@ -1108,6 +1677,7 @@ fn main() {
                 if std::env::args().any(|arg| arg == "--hidden") {
                     let _ = window.hide();
                 }
+                dev_server_fallback(&handle, &window);
             }
 
             if settings.start_client_on_launch {

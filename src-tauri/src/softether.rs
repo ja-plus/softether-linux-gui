@@ -147,21 +147,54 @@ pub fn text_says_success(output: &str) -> bool {
     MARKERS.iter().any(|marker| output.contains(marker))
 }
 
-/// 会话是否已连接。中英文的表头字段值和状态值都认。
+/// 会话是否**真的通了**。中英文的表头字段值和状态值都认。
+///
+/// 「连接中」故意不算：客户端连不上服务器时会**无限重连**，AccountList 的状态
+/// 一直停在「连接中」，`AccountStatusGet` 的会话状态则反复刷「重试」。
+/// 把这种状态当成已连接，界面就会显示绿色的「已连接」而实际一个包都过不去
+/// ——踩过：账户密码不对，会话卡在「重试」40 秒以上，配置行却是绿的。
 pub fn status_is_connected(output: &str) -> bool {
-    const CONNECTED: [&str; 6] = [
+    const CONNECTED: [&str; 5] = [
         "连接完成",          // cn
         "已连接",            // cn 简写
-        "连接中",
         "Connection Completed", // en
         "Connected",
         "接続完了",          // ja
     ];
     // 明确排除"未连接"类描述，避免 `已连接` 命中 `未连接` 的误判
-    if output.contains("未连接") || output.contains("Not Connected") || output.contains("未接続") {
+    if is_disconnected(output) {
         return false;
     }
     CONNECTED.iter().any(|marker| output.contains(marker))
+}
+
+/// 是否"正在连、还没通"：客户端在握手、认证或反复重试。
+///
+/// 单独拎出来是因为它在界面上的含义完全不同——既不能报成「已连接」（会骗人），
+/// 也不能报成「未连接」（会让人以为没在连）。
+pub fn status_is_connecting(output: &str) -> bool {
+    const CONNECTING: [&str; 8] = [
+        "连接中",
+        "正在连接",
+        "开始连接",
+        "重试",
+        "验证用户身份",
+        "Connecting",
+        "Retrying",
+        "Authenticating",
+    ];
+    if is_disconnected(output) || status_is_connected(output) {
+        return false;
+    }
+    CONNECTING.iter().any(|marker| output.contains(marker))
+}
+
+/// 「没连上」的几种说法。必须先行排除，否则 `Connected` 会命中 `Not Connected`。
+fn is_disconnected(output: &str) -> bool {
+    output.contains("未连接")
+        || output.contains("Not Connected")
+        || output.contains("未接続")
+        || output.contains("离线")
 }
 
 /// 表格里按多个可能的列名取值，解决表头随语言变化的问题。
@@ -263,6 +296,8 @@ pub fn parse_account_detail(output: &str) -> AccountDetail {
         encrypted: get("通过 SSL 加密").contains("启用"),
         compress: get("数据压缩").contains("启用"),
         half_connection: get("使用半双工模式").contains("启用"),
+        // AccountGet 实际不输出 UDP 加速项，这里只能是 false；
+        // 真实值由 vpn::account_detail 从 vpn_client.config 覆盖回来
         no_udp_accel: get("不要使用 UDP 加速").contains("启用"),
         max_tcp: get("VPN 通信中使用的 TCP 的连接数").parse().unwrap_or(1),
     }
@@ -373,8 +408,7 @@ UDP 加速已激活     |否
     }
 
     #[test]
-    fn parses_account_list() {
-        let output = r#"项目                   |价值
+    fn parses_account_list() {        let output = r#"项目                   |价值
 -----------------------+-----------------------------------------------
 VPN 连接设置名称       |tet
 状态                   |已连接
@@ -402,5 +436,47 @@ VPN Server 主机名(地址)|hzvpn.tracyenergy.cn:12443 (直接的 TCP/IP 连接
         let result = parse_ping("192.168.50.1", "30 packets transmitted, 0 received, 100% packet loss");
         assert_eq!(result.rtt_avg_ms, None);
         assert_eq!(result.loss_percent, 100.0);
+    }
+
+    /// 真机踩到的坑：账户密码不对时客户端无限重连，AccountList 一直是「连接中」。
+    /// 这一条必须判成"没连上"，否则界面显示绿色「已连接」而隧道一个包都过不去。
+    #[test]
+    fn connecting_is_not_connected() {
+        assert!(!status_is_connected("连接中"));
+        assert!(!status_is_connected("Connecting"));
+        assert!(status_is_connecting("连接中"));
+        assert!(status_is_connecting("Connecting"));
+        // AccountStatusGet 的会话状态在重连期间是这几个
+        assert!(status_is_connecting("重试"));
+        assert!(status_is_connecting("验证用户身份"));
+        assert!(!status_is_connected("重试"));
+    }
+
+    #[test]
+    fn connected_beats_connecting_prefix() {
+        // 真正的已连接不能被"连接中"的判定吃掉
+        assert!(status_is_connected("连接完成"));
+        assert!(!status_is_connecting("连接完成"));
+        assert!(status_is_connected("已连接"));
+        // 离线/未连接两种说法都不算在连
+        assert!(!status_is_connecting("离线"));
+        assert!(!status_is_connected("离线"));
+        assert!(!status_is_connecting("未连接"));
+    }
+
+    /// 重连中的状态表：会话状态是「重试」但 AccountList 说「连接中」，
+    /// 解析出来的 snapshot 必须是"未连接"，同时 state 要能读到「重试」，
+    /// 这样报错时才能告诉用户卡在哪一步。
+    #[test]
+    fn retrying_status_keeps_state_for_error_message() {
+        let output = r#"项目                   |价值
+-----------------------+------------------------------------
+VPN 连接设置名称       |test
+会话状态               |重试
+连接开始时间           |2026-10-27 13:20:15
+命令成功完成。"#;
+        let parsed = parse_account_status(output);
+        assert!(!parsed.connected, "重试不是已连接");
+        assert_eq!(parsed.state, "重试");
     }
 }

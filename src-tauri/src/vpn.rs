@@ -18,6 +18,11 @@ pub struct Overview {
     pub snapshot: Option<SessionSnapshot>,
     pub vpncmd_ready: bool,
     pub vpn_dir: Option<String>,
+    /// **正在跑的那个客户端进程**所在目录。
+    ///
+    /// 和 `vpn_dir`（按设置解析出来的目录）不是一回事：用户改了设置但没重启
+    /// 客户端时，两者会不一致。界面靠它判断"显示的是不是真的在跑的那份"。
+    pub running_dir: Option<String>,
     pub routes: Vec<String>,
     pub route_warnings: Vec<String>,
     /// 虚拟网卡的累计收发字节（直接读 sysfs）。
@@ -42,9 +47,82 @@ fn probe_service_running() -> bool {
     if std::path::Path::new("/run/softether-vpnclient.pid").is_file() {
         return true;
     }
-    match Command::new("pgrep").args(["-f", "(^|/)vpnclient execsvc"]).stdout(Stdio::null()).status() {
-        Ok(status) => status.success(),
-        Err(_) => false,
+    !running_client_pids().is_empty()
+}
+
+/// 正在运行的 SoftEther 客户端进程（`vpnclient execsvc` 的自守护双进程）。
+///
+/// 直接扫 `/proc` 看 argv，**不用 `pgrep -f`**：后者拿整条命令行做正则，
+/// 任何碰巧含有 "vpnclient execsvc" 的命令（编辑器、调试用的 shell、
+/// grep 自身）都会被算成客户端。假阳性的后果不只是状态显示错——杀进程
+/// 时也会去匹配这些无关命令。
+///
+/// 判定条件必须是 argv[0] 的 basename 精确等于 vpnclient（或 _x64），
+/// 且 argv[1] 就是 execsvc。用户从哪份拷贝起的都算：内置的、Downloads
+/// 里的、自己编译的，一律按"当前真在跑的那个"对待。
+pub fn running_client_pids() -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut pids: Vec<u32> = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(raw) = std::fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        let mut argv = raw.split(|byte| *byte == 0).filter(|part| !part.is_empty());
+        let (Some(argv0), Some(argv1)) = (argv.next(), argv.next()) else {
+            continue;
+        };
+        let argv0 = String::from_utf8_lossy(argv0);
+        let base = argv0.rsplit('/').next().unwrap_or(&argv0);
+        if !matches!(base, "vpnclient" | "vpnclient_x64") {
+            continue;
+        }
+        if String::from_utf8_lossy(argv1) != "execsvc" {
+            continue;
+        }
+        pids.push(pid);
+    }
+    pids.sort_unstable();
+    pids
+}
+
+/// 正在跑的那个客户端可执行文件的**真实路径**。
+///
+/// 停止时必须拿它去跑 `vpnclient stop`，而不是设置里配的那份：
+/// 用户很可能自己装了一份在 `~/Downloads`，而应用内置的是另一份。
+/// 拿内置那份去 stop 用户那份是停不掉的（客户端靠自己目录里的锁文件
+/// 找实例），而 `vpnclient stop` 在这种情况下**仍然以 0 退出**。
+pub fn running_client_binary() -> Option<String> {
+    let pids = running_client_pids();
+    let pid = *pids.first()?;
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let argv0 = raw.split(|byte| *byte == 0).next()?;
+    let path = String::from_utf8_lossy(argv0).to_string();
+    (!path.is_empty()).then_some(path)
+}
+
+/// 正在跑的客户端进程所在目录（`running_client_binary()` 的父目录）。
+pub fn running_client_dir() -> Option<String> {
+    let binary = running_client_binary()?;
+    let dir = std::path::Path::new(&binary).parent()?;
+    Some(settings::path_display(dir))
+}
+
+/// 等客户端进程真的消失。等不到就返回 false，调用方据此决定是否补刀。
+fn wait_until_stopped(timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !probe_service_running() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(150));
     }
 }
 
@@ -192,15 +270,120 @@ fn link_counters(iface: &str) -> Option<(u64, u64)> {
     Some((read("rx_bytes")?, read("tx_bytes")?))
 }
 
-pub fn detect_iface() -> Option<String> {
-    let mut entries: Vec<String> = std::fs::read_dir("/sys/class/net")
-        .ok()?
+/// SoftEther 的 Linux 客户端按「虚拟适配器名」建 tap：设备名 = `vpn_` + 适配器名小写。
+/// 适配器 `VPN` → `vpn_vpn`，`tet-test` → `vpn_tet-test`。
+fn device_name_for_adapter(adapter: &str) -> Option<String> {
+    let trimmed = adapter.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(format!("vpn_{}", trimmed.to_lowercase()))
+}
+
+/// MAC 归一化：`5E8D018EA0DB`（vpncmd 的输出）与 `5e:8d:01:8e:a0:db`（sysfs）
+/// 必须能对上。
+fn normalize_mac(raw: &str) -> String {
+    raw.chars().filter(|c| c.is_ascii_hexdigit()).map(|c| c.to_ascii_lowercase()).collect()
+}
+
+/// 一块候选虚拟网卡的现场快照。
+#[derive(Debug, Clone, PartialEq)]
+pub struct IfaceCandidate {
+    pub name: String,
+    pub has_ipv4: bool,
+    /// 归一化后的 MAC；读不到就是空串。
+    pub mac: String,
+}
+
+/// 从候选里挑出"当前该当作隧道网卡"的那一块（纯逻辑，便于测试）。
+///
+/// **不能按字典序取第一个**：SoftEther 客户端会为**所有**虚拟适配器建 tap，
+/// 但只有当前账户那块接了隧道。机器上同时存在 `vpn_tet-test`（闲置）和
+/// `vpn_vpn`（账户 tet 在用）时，字典序取第一个正好取到闲置的那块 ——
+/// 于是 DHCP 要不到地址、网关推导不出来报 NO_GATEWAY，而真正的隧道网卡
+/// 一直没地址、一条路由也没下发。
+///
+/// 判定顺序：账户适配器名 → 适配器 MAC → 唯一有地址的那块 → 字典序兜底。
+pub fn pick_iface(
+    candidates: &[IfaceCandidate],
+    accounts: &[AccountSummary],
+    nics: &[NicInfo],
+) -> Option<String> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let exists = |name: &str| candidates.iter().any(|candidate| candidate.name == name);
+
+    // 1) 已连接的账户优先，其次是正在连的，最后按账户清单顺序
+    let mut ordered: Vec<&AccountSummary> = accounts.iter().collect();
+    ordered.sort_by_key(|account| state_rank(&account.status));
+    for account in &ordered {
+        let Some(device) = device_name_for_adapter(&account.nic) else { continue };
+        if exists(&device) {
+            return Some(device);
+        }
+    }
+
+    // 2) 名字对不上时按 MAC 认：适配器名里有大小写、空格、非法字符时
+    //    系统会改写设备名，只有 MAC 是稳的。
+    //
+    //    两边都归一化再比：sysfs 是 `5e:96:...`，vpncmd 是 `5E961B...`，
+    //    直接字符串比会全部不命中（而且不报错，只是悄悄退回字典序）。
+    for account in &ordered {
+        let Some(nic) = nics.iter().find(|nic| nic.name == account.nic) else { continue };
+        let mac = normalize_mac(&nic.mac);
+        if mac.is_empty() {
+            continue;
+        }
+        if let Some(hit) = candidates.iter().find(|candidate| normalize_mac(&candidate.mac) == mac) {
+            return Some(hit.name.clone());
+        }
+    }
+
+    // 3) 只有一块网卡有地址时，它一定就是隧道网卡
+    let with_addr: Vec<&IfaceCandidate> = candidates.iter().filter(|c| c.has_ipv4).collect();
+    if let [only] = with_addr.as_slice() {
+        return Some(only.name.clone());
+    }
+
+    // 4) 兜底：至少让界面上有个设备名，别显示"未知"
+    candidates.first().map(|candidate| candidate.name.clone())
+}
+
+/// 扫一遍 `/sys/class/net` 里的虚拟网卡；有没有 IPv4 用一次 `ip` 调用统一问。
+fn iface_candidates() -> Vec<IfaceCandidate> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/net") else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.file_name().to_string_lossy().to_string())
         .filter(|name| name.starts_with("vpn_"))
         .collect();
-    entries.sort();
-    entries.into_iter().next()
+    names.sort();
+    let with_addr = settings::interfaces_with_ipv4();
+    names
+        .into_iter()
+        .map(|name| IfaceCandidate {
+            has_ipv4: with_addr.contains(&name),
+            mac: std::fs::read_to_string(format!("/sys/class/net/{name}/address"))
+                .map(|text| normalize_mac(&text))
+                .unwrap_or_default(),
+            name,
+        })
+        .collect()
+}
+
+/// 当前该当作隧道网卡的设备名。
+///
+/// 有账户/网卡清单时按「账户 → 适配器 → 设备」认（见 `pick_iface`）；
+/// 清单为空（客户端没跑、vpncmd 不可用）时退化成"唯一有地址的那块 / 字典序第一"。
+pub fn detect_iface(accounts: &[AccountSummary], nics: &[NicInfo]) -> Option<String> {
+    let candidates = iface_candidates();
+    if candidates.is_empty() {
+        return None;
+    }
+    pick_iface(&candidates, accounts, nics)
 }
 
 /// 读一份状态，走缓存。高频轮询（前端 2 秒一轮）专用。
@@ -221,7 +404,6 @@ fn build_overview(settings: &Settings, fresh: bool) -> Overview {
     let now = Instant::now();
     // 轮询路径用缓存版探测：每 2 秒 fork 一次 pgrep 没必要
     let running = service_running_cached();
-    let iface = detect_iface();
     let vpncmd_ready = settings::vpncmd_path(settings).is_some();
     let (accounts, nics, snapshot) = if vpncmd_ready && running {
         let (accounts, nics) = read_inventory(settings, now);
@@ -233,6 +415,9 @@ fn build_overview(settings: &Settings, fresh: bool) -> Overview {
         clear_overview_cache();
         (Vec::new(), Vec::new(), None)
     };
+    // 网卡要在拿到账户清单之后才认：设备名必须和"哪个账户连着"对上，
+    // 机器上可能同时存在多块 tap（见 `pick_iface` 的说明）。
+    let iface = detect_iface(&accounts, &nics);
 
     let routes = iface.as_deref().map(settings::routes_on).unwrap_or_default();
     let (link_rx_bytes, link_tx_bytes) = iface.as_deref().and_then(link_counters).unwrap_or((0, 0));
@@ -266,10 +451,25 @@ fn build_overview(settings: &Settings, fresh: bool) -> Overview {
         snapshot,
         vpncmd_ready,
         vpn_dir: settings::find_vpn_dir(settings).map(|p| settings::path_display(&p)),
+        running_dir: if running { running_client_dir() } else { None },
         routes,
         route_warnings,
         link_rx_bytes,
         link_tx_bytes,
+    }
+}
+
+/// 账户状态的优先级：已连接 > 正在连 > 其它。
+///
+/// 挑"当前会话"和挑网卡都要用它：正在连的账户虽然还没通，但它比离线账户
+/// 更可能是那根正在用的隧道（半连接时网卡已经建好，只是还没地址）。
+fn state_rank(status: &str) -> u8 {
+    if crate::softether::status_is_connected(status) {
+        0
+    } else if crate::softether::status_is_connecting(status) {
+        1
+    } else {
+        2
     }
 }
 
@@ -281,8 +481,9 @@ pub fn active_account(settings: &Settings, accounts: &[AccountSummary]) -> Optio
     }
     accounts
         .iter()
-        .find(|a| crate::softether::status_is_connected(&a.status))
+        .find(|a| state_rank(&a.status) == 0)
         .map(|a| a.name.clone())
+        .or_else(|| accounts.iter().find(|a| state_rank(&a.status) == 1).map(|a| a.name.clone()))
         .or_else(|| accounts.first().map(|a| a.name.clone()))
 }
 
@@ -291,16 +492,49 @@ pub fn account_detail(settings: &Settings, name: &str) -> Result<AccountDetail, 
     if !crate::softether::text_says_success(&output.stdout) {
         return Err(last_error(&output.stdout));
     }
-    Ok(softether::parse_account_detail(&output.stdout))
+    let mut detail = softether::parse_account_detail(&output.stdout);
+    // AccountGet 的输出里没有 UDP 加速项（实测 4.44 只有 20 个字段），
+    // 读真实值只能看客户端配置文件；写入侧改的也是这份文件，两边同源。
+    if let Some(no_udp) = settings::find_vpn_dir(settings)
+        .and_then(|dir| crate::client_dir::account_no_udp_accel(&dir, name))
+    {
+        detail.no_udp_accel = no_udp;
+    }
+    Ok(detail)
 }
 
 pub fn last_error(output: &str) -> String {
+    // vpncmd 拒绝参数时**不会**说"错误"，它说的是
+    //   `参数 "/HOST" 已被指定。使用命令 "AccountCreate" 时，不可能指定此参数。`
+    // 只找"错误/失败/Error"会漏掉这类最该显示给用户的原因。
+    const HINTS: [&str; 8] = [
+        "错误",
+        "失败",
+        "Error",
+        "已被指定",
+        "不可能指定",
+        "不正确",
+        "invalid",
+        "not found",
+    ];
     let line = output
         .lines()
         .rev()
-        .find(|line| line.contains("错误") || line.contains("失败") || line.contains("Error"))
+        .find(|line| HINTS.iter().any(|hint| line.contains(hint)))
         .map(|line| line.trim().to_string());
-    line.unwrap_or_else(|| {
+    if let Some(line) = line {
+        return line;
+    }
+    // 实在没有关键词：取最后一条有内容的输出（去掉交互提示行），
+    // 比一句"命令没有成功完成"有用得多
+    let tail = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| !line.starts_with("VPN Client>") && !line.starts_with("----"))
+        .next_back()
+        .map(str::to_string);
+    tail.unwrap_or_else(|| {
         crate::i18n::tr(
             "命令没有成功完成",
             "The command did not complete successfully.",
@@ -310,9 +544,16 @@ pub fn last_error(output: &str) -> String {
 }
 
 pub fn account_status(settings: &Settings, name: &str) -> Option<SessionSnapshot> {
+    account_snapshot(settings, name).filter(|snapshot| snapshot.connected)
+}
+
+/// 读一次会话快照，**不管连没连上都返回**（只有 vpncmd 本身失败才是 None）。
+///
+/// 与 `account_status` 的区别：那个只回答"通了吗"，这个是给连接等待过程解释
+/// "卡在哪一步"用的——卡在「重试」和压根没开始连接，处理方式完全不同。
+pub fn account_snapshot(settings: &Settings, name: &str) -> Option<SessionSnapshot> {
     let output = settings::vpncmd(settings, settings::VpncmdAuth::Plain, &["AccountStatusGet", name]).ok()?;
-    let parsed = softether::parse_account_status(&output.stdout);
-    parsed.connected.then_some(parsed)
+    Some(softether::parse_account_status(&output.stdout))
 }
 
 /// 以 root 执行一条无参命令。
@@ -428,6 +669,11 @@ fn start_service_inner(settings: &Settings) -> Result<bool, String> {
         if service_running() {
             return Ok(true);
         }
+        if let Some(code) = output.as_ref().and_then(|o| o.status.code()) {
+            if settings::NOT_AUTHORIZED.contains(&code) {
+                return Err(settings::explain_not_authorized(""));
+            }
+        }
         return Err(explain_failure("启动", "start", output.and_then(|o| o.status.code())));
     }
     if which("systemctl").is_some() {
@@ -461,25 +707,68 @@ fn stop_service_inner(settings: &Settings, wait_seconds: Option<u64>) -> Result<
     if !service_running() {
         return Ok(());
     }
-    if let Some(binary) = settings::vpnclient_path(settings) {
-        let binary = binary.to_string_lossy().to_string();
+    // 先走 `vpnclient stop`（让客户端自己收尾，正常路径下会写回配置）。
+    let outcome = stop_service_once(settings, wait_seconds);
+    // 退出码 0 不算数，只有进程真的消失才算停成功——客户端在这种情况下
+    // 也照样打印 "has been stopped"。
+    if wait_until_stopped(Duration::from_secs(8)) {
+        return Ok(());
+    }
+    // 授权就没拿到时进程压根没被碰过，补刀只会再弹一个授权框、失败得更慢，
+    // 而且最后的"进程仍在运行"会把真正原因盖掉。
+    if auth_failed(&outcome) {
+        return outcome;
+    }
+    force_stop_client();
+    if wait_until_stopped(Duration::from_secs(6)) {
+        return Ok(());
+    }
+    // 到这里是真的停不掉。把第一手的输出带出去——用户看到的
+    // "Unable to create /usr/lib/.../*.VPN-xxxx" 才指向真正原因。
+    Err(match outcome {
+        Err(message) => message,
+        Ok(()) => crate::i18n::tr(
+            "客户端没有响应停止指令，进程仍在运行。可以用下面的命令强制结束：sudo pkill -f 'vpnclient execsvc'",
+            "The client did not honor the stop request and is still running. Force it with: sudo pkill -f 'vpnclient execsvc'",
+        )
+        .to_string(),
+    })
+}
+
+/// 授权环节就已经失败了吗。为真时说明命令压根没执行、进程没被碰过，
+/// 后面任何"补刀"都只是多弹一个授权框。
+fn auth_failed(result: &Result<(), String>) -> bool {
+    match result {
+        Ok(()) => false,
+        Err(message) => settings::looks_like_not_authorized(message),
+    }
+}
+
+fn stop_service_once(settings: &Settings, wait_seconds: Option<u64>) -> Result<(), String> {
+    // 优先用**正在跑的那份**客户端去 stop：用户自己装的在 ~/Downloads，
+    // 应用内置的在 /usr/lib，两者不是同一个二进制。拿错那份去 stop，
+    // 客户端会因为找不到实例而什么都不做，而且照样打印 "has been stopped"。
+    let binary = running_client_binary().or_else(|| {
+        settings::vpnclient_path(settings).map(|p| p.to_string_lossy().to_string())
+    });
+    if let Some(binary) = binary {
         if settings::privileged_helper().is_some() {
-            settings::run_helper_with_timeout(&["vpnclient", "stop", &binary], wait_seconds)
-                .map_err(|e| {
-                    if crate::i18n::is_en() {
-                        format!("Failed to stop the VPN service: {e}")
-                    } else {
-                        format!("停止 VPN 服务失败: {e}")
-                    }
-                })?;
+            let output = settings::run_helper_with_timeout(
+                &["vpnclient", "stop", &binary],
+                wait_seconds,
+            )
+            .map_err(|e| {
+                if crate::i18n::is_en() {
+                    format!("Failed to stop the VPN service: {e}")
+                } else {
+                    format!("停止 VPN 服务失败: {e}")
+                }
+            })?;
             if !service_running() {
                 return Ok(());
             }
-            return Err(crate::i18n::tr(
-                "停止客户端后进程仍在运行",
-                "The client process is still running after stopping.",
-            )
-            .into());
+            // 助手把客户端自己的输出原样带回来了，里面才有真正原因
+            return Err(stop_still_running(&output));
         }
         let output = run_root(&binary, "stop", wait_seconds).map_err(|e| {
             if crate::i18n::is_en() {
@@ -490,6 +779,12 @@ fn stop_service_inner(settings: &Settings, wait_seconds: Option<u64>) -> Result<
         })?;
         if !service_running() {
             return Ok(());
+        }
+        // pkexec 被取消/没有认证代理时进程压根没被动过，报"仍在运行"是误导
+        if let Some(code) = output.as_ref().and_then(|o| o.status.code()) {
+            if settings::NOT_AUTHORIZED.contains(&code) {
+                return Err(settings::explain_not_authorized(""));
+            }
         }
         if output.is_none() {
             return Err(crate::i18n::tr(
@@ -511,6 +806,61 @@ fn stop_service_inner(settings: &Settings, wait_seconds: Option<u64>) -> Result<
         "Failed to stop the VPN service; the client process is still running.",
     )
     .into())
+}
+
+/// `vpnclient stop` 之后进程还活着的兜底：直接对 `vpnclient execsvc` 补 SIGTERM。
+///
+/// 为什么可以直接杀：客户端是**无状态服务**（配置落在 `vpn_client.config`，
+/// 隧道由内核侧的会话管理），SIGTERM 打断它不会丢配置，下次 start 照常起来。
+/// 而放着不管的代价是界面永远只能报"停止失败"——那是彻底没辙的状态。
+///
+/// 只有既没装特权助手、也没有可用的免密路径时才走这里。装了助手的情况下
+/// 这个收尾由助手脚本自己做（进程在 root 名下，用户态根本杀不掉）。
+fn force_stop_client() {
+    let pids = running_client_pids();
+    if pids.is_empty() {
+        return;
+    }
+    let pids: Vec<String> = pids.iter().map(u32::to_string).collect();
+    // 客户端在 root 名下，普通用户杀不掉，必须借一次特权
+    let signal = |name: &str| {
+        let mut command = Command::new("pkexec");
+        command.arg("kill").arg(name).args(&pids);
+        let _ = command.status();
+    };
+    signal("-TERM");
+    // 收到 TERM 后客户端会写完配置再退，给它时间
+    if wait_until_stopped(Duration::from_secs(5)) {
+        return;
+    }
+    signal("-KILL");
+    let _ = wait_until_stopped(Duration::from_secs(3));
+}
+
+/// 客户端进程还在跑时给用户的说明。
+///
+/// 把助手带回来的原始输出接在后面：`vpnclient` 自己在配置写不进去时
+/// 只会打印 "Unable to create /usr/lib/.../.VPN-xxxx"，那句话才指向真正原因，
+/// 换成一句笼统的"停止失败"，用户只能猜。
+fn stop_still_running(output: &str) -> String {
+    let detail = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| line.contains("Unable") || line.contains("Error") || line.contains("错误"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    if crate::i18n::is_en() {
+        if detail.is_empty() {
+            "The client process is still running after stopping.".to_string()
+        } else {
+            format!("The client process is still running after stopping: {detail}")
+        }
+    } else if detail.is_empty() {
+        "停止客户端后进程仍在运行".to_string()
+    } else {
+        format!("停止客户端后进程仍在运行：{detail}")
+    }
 }
 
 /// 客户端进程是否由本应用拉起（用于决定退出时该不该停它）
@@ -575,5 +925,81 @@ mod tests {
         let (accounts, _) = read_inventory(&settings, Instant::now());
         assert_eq!(accounts.len(), 1, "命中缓存必须直接返回缓存内容，不再启动 vpncmd");
         clear_overview_cache();
+    }
+
+    fn account(name: &str, status: &str, nic: &str) -> AccountSummary {
+        AccountSummary {
+            name: name.into(),
+            status: status.into(),
+            host: "example.invalid".into(),
+            port: Some(12443),
+            hub: "VPN".into(),
+            nic: nic.into(),
+        }
+    }
+
+    fn nic(name: &str, mac: &str) -> NicInfo {
+        NicInfo { name: name.into(), enabled: true, mac: mac.into() }
+    }
+
+    fn candidate(name: &str, has_ipv4: bool, mac: &str) -> IfaceCandidate {
+        IfaceCandidate { name: name.into(), has_ipv4, mac: mac.into() }
+    }
+
+    /// 真实踩到的坑：机器上躺着两块 tap，账户连着的那块不一定是字典序第一块。
+    ///
+    /// 账户 `tet` 用适配器 `VPN`（vpn_vpn），另有一块闲置的 `vpn_tet-test`。
+    /// 老实现取字典序第一块 → 拿闲置网卡去 DHCP/推导网关 → NO_GATEWAY，
+    /// 真正在用的隧道网卡一条路由都没下发。
+    #[test]
+    fn picks_adapter_of_connected_account_not_alphabetically_first() {
+        let candidates = vec![
+            candidate("vpn_tet-test", false, "5e:8d:01:8e:a0:db"),
+            candidate("vpn_vpn", false, "5e:96:1b:62:14:96"),
+        ];
+        let accounts = vec![account("tet", "已连接", "VPN")];
+        let nics = vec![nic("tet-test", "5E8D018EA0DB"), nic("VPN", "5E961B621496")];
+        assert_eq!(pick_iface(&candidates, &accounts, &nics).as_deref(), Some("vpn_vpn"));
+    }
+
+    /// 适配器名对不上设备名（系统改写过大小写/非法字符）时按 MAC 认。
+    #[test]
+    fn falls_back_to_mac_when_device_name_differs() {
+        let candidates = vec![
+            candidate("vpn_0", false, "5e:8d:01:8e:a0:db"),
+            candidate("vpn_1", false, "5e:96:1b:62:14:96"),
+        ];
+        let accounts = vec![account("tet", "已连接", "VPN")];
+        let nics = vec![nic("VPN", "5E961B621496")];
+        assert_eq!(pick_iface(&candidates, &accounts, &nics).as_deref(), Some("vpn_1"));
+    }
+
+    /// 清单拿不到（客户端没跑/vpncmd 不可用）时，只有一块网卡有地址就认它。
+    #[test]
+    fn falls_back_to_the_only_iface_with_address() {
+        let candidates = vec![
+            candidate("vpn_aaa", false, ""),
+            candidate("vpn_zzz", true, ""),
+        ];
+        assert_eq!(pick_iface(&candidates, &[], &[]).as_deref(), Some("vpn_zzz"));
+    }
+
+    /// 什么线索都没有时保留老行为：至少给个设备名，不要空着。
+    #[test]
+    fn keeps_alphabetical_first_as_last_resort() {
+        let candidates = vec![
+            candidate("vpn_aaa", false, ""),
+            candidate("vpn_zzz", false, ""),
+        ];
+        assert_eq!(pick_iface(&candidates, &[], &[]).as_deref(), Some("vpn_aaa"));
+        assert_eq!(pick_iface(&[], &[], &[]), None, "一块网卡都没有时必须返回 None");
+    }
+
+    /// 适配器名 → 设备名的规则（vpncmd 里是大写 `VPN`，设备是小写 `vpn_vpn`）。
+    #[test]
+    fn device_name_lowercases_adapter() {
+        assert_eq!(device_name_for_adapter("VPN").as_deref(), Some("vpn_vpn"));
+        assert_eq!(device_name_for_adapter("tet-test").as_deref(), Some("vpn_tet-test"));
+        assert_eq!(device_name_for_adapter("  ").as_deref(), None);
     }
 }

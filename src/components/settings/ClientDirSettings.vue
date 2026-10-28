@@ -1,9 +1,20 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { Check, RefreshCw, ShieldCheck, TriangleAlert } from 'lucide-vue-next'
+import { Check, Loader2, Power, RefreshCw, ShieldCheck, TriangleAlert } from 'lucide-vue-next'
+import { confirmDialog } from '../../lib/dialog'
 import SelectInput, { type SelectOption } from '../SelectInput.vue'
-import { showToast, settings, type ClientCandidate, type ClientSource } from '../../lib/api'
+import {
+  busy,
+  overview,
+  showToast,
+  settings,
+  startService,
+  stopService,
+  switchClientDir,
+  type ClientCandidate,
+  type ClientSource,
+} from '../../lib/api'
 import { t } from '../../lib/i18n'
 import { useSettingsDraft } from '../../composables/useSettingsDraft'
 
@@ -31,6 +42,55 @@ const SOURCE_OPTIONS = computed<{ value: ClientSource; title: string; note: stri
   { value: 'detected', title: t('client.detectedTitle'), note: t('client.detectedNote') },
   { value: 'custom', title: t('client.customTitle'), note: t('client.customNote') },
 ])
+
+/** 客户端服务是否在跑。启停按钮跟着它切换红/绿 */
+const serviceRunning = computed(() => overview.value?.serviceRunning ?? false)
+/** 启停服务进行中：按钮转圈，避免连点 */
+const serviceBusy = computed(() => busy.value === 'service')
+
+function snapshotDraft() {
+  return {
+    source: (draft.clientSource ?? 'bundled') as ClientSource,
+    dir: draft.vpnDir ?? null,
+  }
+}
+
+/**
+ * 需要切换时拦一下，返回 true 表示"已弹确认，调用方别再动草稿"。
+ *
+ * 只有服务在跑才算切换；服务停着的时候改目录本来就是安全的，
+ * 直接写设置、下次启动自然生效。
+ *
+ * 客户端运行中改目录=切换（要停服务、会断隧道），所以**先弹确认再改草稿**。
+ * 记住改之前的值，用户取消时原样恢复——否则草稿已经变了、自动保存又把它写盘，
+ * 就会出现"设置显示新目录、实际跑旧客户端"的错乱。
+ */
+function requestSwitch(dir: string | null | undefined, source: ClientSource): boolean {
+  const target = dir?.trim()
+  if (!target || !serviceRunning.value) return false
+  if (target === overview.value?.runningDir) return false
+  const previous = snapshotDraft()
+  void confirmDialog({
+    title: t('overview.switchTitle'),
+    body: t('overview.switchBody'),
+    confirmText: t('overview.switchConfirm'),
+    danger: true,
+  }).then(async (ok) => {
+    if (!ok) {
+      draft.clientSource = previous.source
+      if (previous.dir !== null) draft.vpnDir = previous.dir
+      return
+    }
+    const result = await switchClientDir(target, source)
+    if (result) {
+      // 后端按切换后的来源写了配置，草稿跟上，免得下一次自动保存把它改回旧值
+      draft.clientSource = source
+      draft.vpnDir = target
+      customCheck.value = null
+    }
+  })
+  return true
+}
 
 /** 内置客户端总在第一位；它不来自扫盘，所以单独取 */
 const bundled = computed(() => candidates.value.find((item) => item.source === 'bundled') ?? null)
@@ -115,10 +175,21 @@ async function scanClients(quiet = false) {
  * 用户往往只是想微调路径，从空白开始会让他把整条路径重打一遍。
  */
 function pickSource(source: ClientSource) {
+  // 「内置」的目标目录是确定的：点它就是切换，运行中先弹确认
+  if (source === 'bundled' && requestSwitch(bundled.value?.dir, 'bundled')) return
+  // 「搜索到的」/「自己指定」还要选具体目录，等选定时再弹（见 onPickDetected / checkCustomDir）
+  if (source !== 'bundled' && requestSwitch(draft.vpnDir, source)) return
   draft.clientSource = source
   customCheck.value = null
   if (source === 'custom' && !draft.vpnDir) draft.vpnDir = ''
   if (source === 'custom') nextTick(() => customInput.value?.focus())
+}
+
+/** 「搜索到的」下拉里选定具体目录 = 一次切换（清空选择不算） */
+function onPickDetected(dir: string | null) {
+  if (!dir) return
+  draft.vpnDir = dir
+  if (requestSwitch(dir, 'detected')) return
 }
 
 async function checkCustomDir() {
@@ -133,6 +204,8 @@ async function checkCustomDir() {
   } finally {
     customChecking.value = false
   }
+  // 校验通过就等于"我要用这个目录"，运行中此时问一句要不要立即切换
+  if (customCheck.value?.usable) requestSwitch(dir, 'custom')
 }
 
 /** 只在「自己指定 + 有路径 + 扫描结果里没有这个路径」时才自动校验 */
@@ -193,9 +266,42 @@ onMounted(() => {
           {{ t('client.introBefore') }}<span class="mono">vpnclient</span>{{ t('client.introAfter') }}
         </p>
       </div>
-      <button class="ghost" :disabled="scanning" @click="scanClients()">
-        <RefreshCw :size="13" :class="{ spin: scanning }" /> {{ scanning ? t('client.scanning') : t('client.rescan') }}
-      </button>
+      <div class="head-actions">
+        <!-- 启停服务放在客户端卡片上：它管的就是这个客户端，
+             放在连接页反而让人以为跟某条隧道绑定。 -->
+        <button
+          v-if="serviceRunning"
+          class="danger"
+          :disabled="!!busy"
+          :title="t('overview.stopTooltip')"
+          @click="stopService()"
+        >
+          <Loader2 v-if="serviceBusy" :size="14" class="spin" />
+          <Power v-else :size="14" />
+          {{ t('overview.stopService') }}
+        </button>
+        <button
+          v-else
+          class="success"
+          :disabled="!!busy"
+          :title="t('overview.startTooltip')"
+          @click="startService()"
+        >
+          <Loader2 v-if="serviceBusy" :size="14" class="spin" />
+          <Power v-else :size="14" />
+          {{ t('overview.startService') }}
+        </button>
+        <!-- 重新扫描只留图标：文字在这张卡片上抢不过启停按钮 -->
+        <button
+          class="ghost icon-only"
+          :disabled="scanning"
+          :aria-label="t('client.rescan')"
+          :title="scanning ? t('client.scanning') : t('client.rescan')"
+          @click="scanClients()"
+        >
+          <RefreshCw :size="15" :class="{ spin: scanning }" />
+        </button>
+      </div>
     </div>
 
     <div class="sources">
@@ -214,7 +320,7 @@ onMounted(() => {
           <span class="source-title">{{ option.title }}</span>
           <!-- 内置的可用性直接标在标题旁：选它之前就该知道它好不好 -->
           <span v-if="option.value === 'bundled' && bundled" class="badge" :class="bundled.usable ? 'ok' : 'bad'">
-            {{ bundled.usable ? `v${bundled.version ?? '?'}` : t('client.missing') }}
+            {{ bundled.usable ? `v${bundled.version ?? '?'}` : bundled.writable ? t('client.missing') : t('client.readOnly') }}
           </span>
           <span v-if="option.value === 'detected'" class="badge off">
             {{ t('client.foundCount', { n: detected.filter((item) => item.usable).length }) }}
@@ -240,7 +346,12 @@ onMounted(() => {
       <div class="row wrap" style="align-items: flex-end">
         <div class="field" style="flex: 1; min-width: 260px">
           <label>{{ t('client.installedClients') }}</label>
-          <SelectInput v-model="draft.vpnDir" :options="detectedOptions" :placeholder="t('client.choosePlaceholder')" />
+          <SelectInput
+            v-model="draft.vpnDir"
+            :options="detectedOptions"
+            :placeholder="t('client.choosePlaceholder')"
+            @update:model-value="onPickDetected"
+          />
         </div>
       </div>
       <p v-if="scanning" class="hint" style="margin: 6px 0 0">{{ t('client.scanningLocations') }}</p>
@@ -294,6 +405,20 @@ onMounted(() => {
 </template>
 
 <style scoped>
+/* 头部右侧：启停按钮在前，扫描图标在后，图标按钮不吃多余宽度 */
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.head-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 /* 三张来源卡片用响应式网格均分；窄窗口自动减少列数 */
 .sources {
   display: grid;

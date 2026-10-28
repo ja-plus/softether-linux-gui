@@ -20,7 +20,8 @@
 #   softether-tray-net probe    <iface> <候选网段,网段,...>
 #   softether-tray-net vpnclient start|stop <vpnclient 绝对路径>
 #
-# 退出码：0 成功；2 参数非法；3 拿不到网关；4 没有 DHCP 客户端；5 身份不对。
+# 退出码：0 成功；2 参数非法；3 拿不到网关；4 没有 DHCP 客户端；
+#         5 身份不对；6 网卡没有 IPv4（DHCP 没要着 / 也没配静态地址）。
 
 set -eu
 
@@ -93,6 +94,25 @@ check_nets() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# 网卡上有没有 IPv4。
+#
+# 这一条和"有没有网关"必须分开判：没有地址时网关**必然**推不出来，
+# 报成 NO_GATEWAY 会把人引去查路由，真正该查的是 DHCP / 静态地址。
+has_ipv4() {
+    ip -4 -o addr show dev "$1" 2>/dev/null | grep -q ' inet '
+}
+
+# 要完租约后地址可能晚一两拍才落到网卡上，卡一下比直接失败稳。
+wait_ipv4() {
+    n=0
+    while [ "$n" -lt 10 ]; do
+        has_ipv4 "$1" && return 0
+        n=$((n + 1))
+        sleep 0.3
+    done
+    has_ipv4 "$1"
+}
+
 # 申请一次租约就退出：不在这留常驻守护进程
 lease_address() {
     iface=$1
@@ -108,10 +128,27 @@ lease_address() {
     return 0
 }
 
-# 网关 = 网卡上 proto kernel 那条网段路由的第一跳（192.168.50.19/24 → 192.168.50.1）。
+# 隧道网关。三条来源，从最可靠的往最猜的排：
+#   1. 默认路由的 via —— 服务端 DHCP 的 routers 选项（192.168.50.1）最终就落成这条；
+#   2. 点对点网卡的 peer 地址 —— 隧道是 ptp 时对端就是网关，`proto kernel` 那条
+#      路由上未必带 src；
+#   3. `proto kernel` 网段路由的主机位改 1（192.168.50.24/24 → 192.168.50.1），
+#      老规则，静态地址环境下只有它可用。
 # OFS 必须在 BEGIN 里设：写在动作里时字段已按 -F. 拆完，会输出 "192 168 50 1"。
 derive_gateway() {
     iface=$1
+    gw=$(ip -4 route show default dev "$iface" 2>/dev/null \
+        | awk '/via/ {for (i = 1; i <= NF; i++) if ($i == "via") {print $(i + 1); exit}}')
+    if [ -n "$gw" ]; then
+        printf '%s\n' "$gw"
+        return 0
+    fi
+    gw=$(ip -4 -o addr show dev "$iface" 2>/dev/null \
+        | awk '{for (i = 1; i <= NF; i++) if ($i == "peer") {v = $(i + 1); sub(/\/.*/, "", v); print v; exit}}')
+    if [ -n "$gw" ]; then
+        printf '%s\n' "$gw"
+        return 0
+    fi
     ip -4 route show dev "$iface" \
         | awk '/proto kernel/ && / src / {print $1; exit}' \
         | cut -d/ -f1 \
@@ -137,6 +174,14 @@ cmd_connect() {
     if [ "$need_lease" -eq 1 ]; then
         lease_address "$iface" \
             || die "系统没有 dhclient/dhcpcd，无法为 $iface 申请地址" 4
+        wait_ipv4 "$iface" || true
+    fi
+
+    # 没地址 → 没网关可推。这两种失败必须分开报：报 NO_GATEWAY 会让人
+    # 去查路由表，而问题其实在"网卡压根没 IP"（DHCP 没响应 / 没配静态地址）。
+    if ! has_ipv4 "$iface"; then
+        printf 'NO_ADDRESS\n' >&2
+        exit 6
     fi
 
     gw=$(derive_gateway "$iface")
@@ -211,6 +256,12 @@ cmd_probe() {
         return 0
     fi
 
+    # 没地址就没有网关可推；诊断页要能说清是"没 IP"还是"推不出网关"
+    if ! has_ipv4 "$iface"; then
+        printf 'NO_ADDRESS\n' >&2
+        exit 6
+    fi
+
     gw=$(derive_gateway "$iface")
     [ -n "$gw" ] || { printf 'NO_GATEWAY\n' >&2; exit 3; }
 
@@ -257,6 +308,61 @@ cmd_probe() {
     note "SUMMARY ok=$ok noroute=$noroute dead=$dead"
 }
 
+# 当前正在跑的 vpnclient 服务进程（`vpnclient execsvc` 的自守护双进程）。
+#
+# 按**进程名**找，不按安装目录找：用户可能自己装了一份在 ~/Downloads，
+# 而应用配的是另一份。拿 A 目录的路径去筛 B 目录的进程，会一个都匹配不到，
+# 于是"停服务"变成什么都不做却返回成功。
+#
+# `pgrep -x` 精确匹配进程名（comm），不会像 `pgrep -f` 那样把命令行里
+# 碰巧含有相关字样的 shell 也算进来。再用 argv[1] 二次确认是 execsvc 形态。
+client_pids() {
+    for pid in $(pgrep -x vpnclient 2>/dev/null) $(pgrep -x vpnclient_x64 2>/dev/null); do
+        argv1=$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | sed -n 2p)
+        if [ "$argv1" = "execsvc" ]; then
+            printf '%s\n' "$pid"
+        fi
+    done
+}
+
+# 停服务后的收尾复核。
+#
+# `vpnclient stop` 会打印 "has been stopped" 并 exit 0，但有两种情况它其实
+# 什么都没做：报告停的是另一个安装目录里的实例，或者它自己连锁文件都写不进去
+# （只读 /usr 上就是这样）。所以这里不认退出码，只认进程是否真的消失。
+reap_vpnclient() {
+    # 正常路径下 stop 后进程不到 1 秒就没了，这里给 2 秒足够；
+    # 等太久会让界面上的 loading 白转（本该停的早停了，没停的多等也没用）。
+    i=0
+    while [ "$i" -lt 10 ]; do
+        pids=$(client_pids)
+        [ -n "$pids" ] || return 0
+        i=$((i + 1))
+        sleep 0.2
+    done
+    note "vpnclient 未退出，发送 SIGTERM：$pids"
+    # shellcheck disable=SC2086  # 就是要拆词
+    kill -TERM $pids 2>/dev/null || true
+    i=0
+    while [ "$i" -lt 25 ]; do
+        pids=$(client_pids)
+        [ -n "$pids" ] || return 0
+        i=$((i + 1))
+        sleep 0.2
+    done
+    note "vpnclient 未响应 SIGTERM，强制结束：$pids"
+    # shellcheck disable=SC2086
+    kill -KILL $pids 2>/dev/null || true
+    i=0
+    while [ "$i" -lt 15 ]; do
+        pids=$(client_pids)
+        [ -n "$pids" ] || return 0
+        i=$((i + 1))
+        sleep 0.2
+    done
+    die "无法结束 vpnclient 进程：$pids"
+}
+
 cmd_vpnclient() {
     action=${1:?} binary=${2:?}
     case "$action" in
@@ -271,9 +377,46 @@ cmd_vpnclient() {
     [ -x "$binary" ] || die "vpnclient 不可执行: $binary" 2
     case "$(basename "$binary")" in
         vpnclient|vpnclient_x64) ;;
+        */*|vpnclient|vpnclient_x64) ;;
         *) die "拒绝执行非 vpnclient 程序: $binary" 2 ;;
     esac
-    exec "$binary" "$action"
+    if [ "$action" = start ]; then
+        exec "$binary" start
+    fi
+    # 退出码不可信，但输出要原样带回给上层：配置写不进去时
+    # vpnclient 只会打印 "Unable to create ..."，那句话才指向真正原因。
+    set +e
+    "$binary" stop
+    note "vpnclient stop 退出码: $?"
+    set -e
+    reap_vpnclient
+}
+
+# 把内置客户端目录里的配置文件交还给调用它的那个用户。
+#
+# 为什么需要：客户端以 root 运行，会把 vpn_client.config 写成 root:root 0600；
+# 而应用是普通用户在跑，读不了这份文件——结果就是"连接配置"页里
+# 内置客户端那一组永远是空的，用户以为配置丢了。
+#
+# 白名单只放本应用自己的内置副本目录（系统那份 + 用户数据目录那份），
+# 不接受任意路径，避免被用来把系统文件 chown 给调用者。
+cmd_claim_config() {
+    dir=${1:?}
+    resolved=$(readlink -f "$dir" 2>/dev/null || printf '%s' "$dir")
+    case "$resolved" in
+        /usr/lib/softether-tray/client|*/.local/share/softether-tray/client) ;;
+        *) die "拒绝处理非内置客户端目录: $dir" 2 ;;
+    esac
+    config="$resolved/vpn_client.config"
+    [ -f "$config" ] || return 0
+
+    owner=${PKEXEC_UID:-0}
+    [ "$owner" -gt 0 ] || die "拿不到调用者 uid" 3
+    group=$(id -g "$owner" 2>/dev/null || printf '%s' "$owner")
+    # 只改属主和权限，不动内容：客户端以 root 运行，改完仍能读写
+    chown "$owner:$group" "$config"
+    chmod 600 "$config"
+    note "已将 $config 的属主交还给 uid=$owner"
 }
 
 main() {
@@ -306,6 +449,9 @@ main() {
         vpnclient)
             [ "$(id -u)" -eq 0 ] || die "must run as root" 5
             cmd_vpnclient "$@" ;;
+        claim-config)
+            [ "$(id -u)" -eq 0 ] || die "must run as root" 5
+            cmd_claim_config "$@" ;;
         *) die "未知动作: ${action:-<空>}" 2 ;;
     esac
 }

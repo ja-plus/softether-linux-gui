@@ -3,11 +3,14 @@ import type { Settings } from '../lib/api'
 import { locale } from '../lib/i18n'
 
 /**
- * 设置页的共享草稿。
+ * 设置类页面的共享草稿。
  *
- * 六张设置卡片都改同一份 `Settings`，逐层 v-model 传下去会变成一堆
+ * 每张卡片都改同一份 `Settings`，逐层 v-model 传下去会变成一堆
  * `update:xxx` 事件，所以这里用 provide/inject 共享同一个 reactive 对象：
  * 卡片只管改自己的字段，落盘交给 useAutoSave 统一处理。
+ *
+ * 目前有两个提供方：`SettingsTab`（语言/样式/默认/路由/诊断五张卡）和
+ * `ClientTab`（客户端目录）。provide 必须在**卡片的直接父组件**里做。
  */
 
 /** 默认网段：RFC1918 三段全下，绝大多数内网都落在这三个里 */
@@ -42,9 +45,9 @@ export function provideSettingsDraft(draft: Settings) {
   provide(DRAFT_KEY, draft)
 }
 
-/** 取当前设置页的草稿；脱离 SettingsTab 使用直接报错，免得拿到 undefined 静默失效 */
+/** 取当前页面的草稿；没有 provide 就直接报错，免得拿到 undefined 静默失效 */
 export function useSettingsDraft(): Settings {
   const draft = inject(DRAFT_KEY)
-  if (!draft) throw new Error('useSettingsDraft() 只能在 SettingsTab 的子组件里调用')
+  if (!draft) throw new Error('useSettingsDraft() 只能在 SettingsTab / ClientTab 的子组件里调用')
   return draft
 }

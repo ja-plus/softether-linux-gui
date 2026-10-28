@@ -1,7 +1,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { settings, type Settings } from '../lib/api'
-import { t } from '../lib/i18n'
+import { t, type MessageKey } from '../lib/i18n'
 import { MTU_RANGE } from './useSettingsDraft'
 
 /**
@@ -22,7 +22,16 @@ const SETTLE_MS = 500
 /** 「已保存」提示停留时长，之后回落到 idle 的常驻说明 */
 const FLASH_MS = 1800
 
-export function useAutoSave(draft: Settings) {
+/**
+ * `idleHint` 是底部状态栏空闲时那句话的词条 key。
+ *
+ * 设置页和「SoftEther 客户端」页共用这套自动保存，但两页要说的事不一样
+ * （一页讲路由要重连才生效，一页讲换目录会重启客户端），所以由调用方指定。
+ */
+export function useAutoSave(
+  draft: Settings,
+  idleHint: MessageKey = 'settings.autoSaveHint',
+) {
   const autoState = ref<AutoState>('idle')
   const autoError = ref('')
   const blockReason = ref('')
@@ -76,6 +85,18 @@ export function useAutoSave(draft: Settings) {
   }
 
   /**
+   * 没什么要存的：把「被卡住」和「写盘失败」这两种状态收掉，底部回到常驻说明。
+   *
+   * 不能无条件调用——`saved` 的绿字要让 flashTimer 自己闪完，
+   * `saving` 更不能在这里改写，那是另一个请求的结果。
+   */
+  function settle() {
+    blockReason.value = ''
+    autoError.value = ''
+    autoState.value = 'idle'
+  }
+
+  /**
    * 落盘。所有改动最终都收到这里，包括离开页面时那一次补写。
    *
    * 失败不回滚 draft：用户填的东西不能因为一次写盘失败就消失，
@@ -86,7 +107,16 @@ export function useAutoSave(draft: Settings) {
     saveTimer = undefined
 
     const payload = snapshot()
-    if (fingerprint(payload) === savedFingerprint) return
+    // 草稿已经等于磁盘上那一份，没有东西要写。
+    //
+    // 但这里不能只是 return：典型场景是「自己指定」填了空路径被 blocked，
+    // 用户点回「内置客户端」后 snapshot 会把 vpnDir 归零，指纹正好等于
+    // 已落盘那份——于是走这条路，状态永远停在「尚未保存：请填写目录路径」，
+    // 而界面上明明已经是内置客户端、结论行还是绿的。
+    if (fingerprint(payload) === savedFingerprint) {
+      if (autoState.value === 'blocked' || autoState.value === 'error') settle()
+      return
+    }
 
     // 上一次写盘还没回来：排到队尾再来一次，别让两个请求抢同一个配置文件
     if (autoState.value === 'saving') {
@@ -110,6 +140,9 @@ export function useAutoSave(draft: Settings) {
       echoGuard = true
       settings.value = saved
       autoState.value = 'saved'
+      // 写盘期间草稿又被改了（比如连点两下来源卡片）：这次响应落的是旧值，
+      // 立刻再排一次，否则状态栏显示「已保存」而磁盘上还是上一版。
+      if (fingerprint(draft) !== savedFingerprint) queueSave()
       window.clearTimeout(flashTimer)
       flashTimer = window.setTimeout(() => {
         if (autoState.value === 'saved') autoState.value = 'idle'
@@ -155,7 +188,7 @@ export function useAutoSave(draft: Settings) {
       case 'error':
         return autoError.value
       default:
-        return t('settings.autoSaveHint')
+        return t(idleHint)
     }
   })
 

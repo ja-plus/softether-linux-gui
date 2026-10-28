@@ -10,15 +10,18 @@ import LanguageSettings from './settings/LanguageSettings.vue'
 import StyleSettings from './settings/StyleSettings.vue'
 import DefaultsSettings from './settings/DefaultsSettings.vue'
 import RoutesSettings from './settings/RoutesSettings.vue'
-import ClientDirSettings from './settings/ClientDirSettings.vue'
 import DiagSettings from './settings/DiagSettings.vue'
 import InfoTip from './InfoTip.vue'
 
 /**
- * 设置页只负责三件事：造草稿、把草稿发给六张卡片、在底部挂保存状态。
+ * 设置页只负责三件事：造草稿、把草稿发给五张卡片、在底部挂保存状态。
  *
  * 各卡片自己读写草稿里属于自己的字段（provide/inject），
  * 落盘的时机与校验统一由 useAutoSave 决定，卡片不需要知道"保存"这回事。
+ *
+ * 注意：`provideSettingsDraft` 必须留在**本组件**，卡片是它的直接子组件。
+ * 别把这套壳抽成带 slot 的公共组件——provide/inject 要跨 slot 边界，
+ * 那是另一条不稳定的路径，为省几十行模板不值得。
  */
 
 const draft = createSettingsDraft()
@@ -40,8 +43,8 @@ onMounted(async () => {
 </script>
 
 <template>
-  <section class="settings">
-    <div class="settings-scroll">
+  <section class="pane">
+    <div class="pane-scroll">
       <header>
         <div class="title-line">
           <h1>{{ t('settings.title') }}</h1>
@@ -53,11 +56,10 @@ onMounted(async () => {
       <StyleSettings />
       <DefaultsSettings />
       <RoutesSettings />
-      <ClientDirSettings />
       <DiagSettings />
     </div>
 
-    <div class="foot">
+    <div class="pane-foot">
       <span class="auto-status" :class="autoState">
         <i class="dot" />
         {{ autoText }}
@@ -71,78 +73,9 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.settings {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-}
-
-.settings-scroll {
-  flex: 1;
-  min-height: 0;
-  padding: 18px 20px 24px;
-  display: flex;
-  flex-direction: column;
-  overflow: auto;
-  gap: 12px;
-}
-
 .title-line {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-/* 状态栏独立于滚动区，始终固定在设置页底部。 */
-.foot {
-  flex: none;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 20px 10px;
-  background: var(--bg);
-  border-top: 0.5px solid var(--line);
-}
-
-.auto-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-hint);
-}
-
-.auto-status.saving {
-  color: var(--text-soft);
-}
-
-.auto-status.saving .dot {
-  animation: status-pulse 1s ease-in-out infinite;
-}
-
-.auto-status.saved {
-  color: var(--ok);
-}
-
-.auto-status.blocked {
-  color: var(--warn);
-}
-
-.auto-status.error {
-  color: var(--danger);
-}
-
-@keyframes status-pulse {
-  50% {
-    opacity: 0.2;
-  }
-}
-
-.foot button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
 }
 </style>
