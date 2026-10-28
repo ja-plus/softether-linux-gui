@@ -114,7 +114,10 @@ The app reads connection profiles straight out of the SoftEther client, which me
 
 ## Passwords
 
-The password is handed to `vpncmd` only at the moment of saving, written to a temporary file with mode 0600 and deleted immediately afterwards; `settings.json` contains only routes and UI preferences — never passwords.
+The password is used only at the moment of saving — never in command-line arguments, temporary files, `settings.json`, or logs:
+
+- Passwords of printable ASCII up to 63 bytes are fed to `vpncmd`'s interactive prompt through stdin.
+- Passwords containing non-ASCII characters (Chinese, full-width forms, …) or exceeding 63 bytes are hashed locally with SoftEther's password hash and written straight into `vpn_client.config`. SoftEther's interactive prompt accepts only printable ASCII into a 64-byte buffer, silently dropping everything else — saving through it would store a different password than typed and authentication would always fail. This path briefly restarts the client service so the config takes effect.
 
 ## Launch at login
 
